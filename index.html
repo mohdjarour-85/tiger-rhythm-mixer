@@ -211,11 +211,46 @@ async function synthesizeBar(slots, stepsPerBeat, bpm, sampleRate) {
   }
   return trimmed;
 }
-/* يبني عبارة من 4 مازورات: 3 عادية + تقسيمة (fill) وحدة — يعطي إحساس لوب جاهز متنوع بدل التكرار الثابت */
+/* يبني عبارة من 4 مازورات: 3 عادية + تقسيمة (fill) وحدة — يعطي إحساس لوب جاهز متنوع بدل التكرار الثابت (احتياطي إذا ما فيه جريد نبضات محسوب) */
 async function buildPhraseBuffer(pattern, bpm, sampleRate) {
   const normalBar = await synthesizeBar(pattern.slots, pattern.stepsPerBeat, bpm, sampleRate);
   const fillBar = await synthesizeBar(pattern.fill || pattern.slots, pattern.stepsPerBeat, bpm, sampleRate);
   return concatBuffers([normalBar, normalBar, normalBar, fillBar]);
+}
+/* يبني الإيقاع بالمحاذاة الحقيقية: كل دم/تك يُحسب ويُحط بالضبط على وقت النبضة الفعلية بالجريد، بدل سرعة ثابتة مفترضة */
+async function buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, sampleRate) {
+  if (!beatGrid || beatGrid.length < 3) return null;
+  const stepsPerBeat = pattern.stepsPerBeat || 2;
+  const beatsPerBar = pattern.slots.length / stepsPerBeat;
+  const duration = Math.max(0.05, endTime - startTime);
+  const length = Math.ceil(duration * sampleRate) + 2048;
+  const ctx = new OfflineAudioContext(2, length, sampleRate);
+
+  for (let i = 0; i < beatGrid.length - 1; i++) {
+    const b0 = beatGrid[i];
+    const b1 = beatGrid[i + 1];
+    if (b1 <= startTime) continue;
+    if (b0 >= endTime) break;
+    const beatInBar = i % beatsPerBar;
+    const barIdx = Math.floor(i / beatsPerBar);
+    const useFill = !!pattern.fill && barIdx % 4 === 3;
+    const slots = useFill ? pattern.fill : pattern.slots;
+    const beatDur = b1 - b0;
+    for (let s = 0; s < stepsPerBeat; s++) {
+      const type = slots[beatInBar * stepsPerBeat + s];
+      if (!type || type === "-") continue;
+      const tReal = b0 + (beatDur * s) / stepsPerBeat;
+      if (tReal < startTime || tReal >= endTime) continue;
+      const tLocal = tReal - startTime;
+      if (type === "dum") hitDum(ctx, tLocal);
+      else if (type === "tak") hitTak(ctx, tLocal);
+      else if (type === "clap") hitClap(ctx, tLocal);
+      else if (type === "hat") hitHat(ctx, tLocal, false);
+      else if (type === "hatO") hitHat(ctx, tLocal, true);
+      else if (type === "crash") hitCrash(ctx, tLocal);
+    }
+  }
+  return await ctx.startRendering();
 }
 
 /* ---------- تحليل تلقائي: السرعة (BPM) ونقطة التنبو ---------- */
@@ -791,8 +826,12 @@ function App() {
       return loop.buffer;
     }
     const pattern = PATTERNS.find((p) => p.id === patternId);
+    if (beatGrid.length > 2) {
+      const locked = await buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, songBuffer.sampleRate);
+      if (locked) return locked;
+    }
     return await buildPhraseBuffer(pattern, bpm, songBuffer.sampleRate);
-  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm]);
+  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime]);
 
   const stopPreview = () => {
     previewNodesRef.current.forEach((n) => {
@@ -1001,6 +1040,7 @@ function App() {
               ))}
             </div>
             <div style={styles.hint}>كل نمط فيه تقسيمة تلقائية كل 4 مازورات — مو تكرار ثابت</div>
+            <div style={styles.hint}>{beatGrid.length > 2 ? "✅ الإيقاع محاذى على نبضات الأغنية الحقيقية (اكتشاف تلقائي مفعّل)" : "⚠️ اضغط \"اكتشاف التنبو والجريد تلقائيًا\" فوق حتى يمشي كل دم/تك بالضبط مع نبضات الأغنية الحقيقية"}</div>
           </>
         ) : (
           <div style={{ marginTop: 14 }}>
