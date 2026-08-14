@@ -253,6 +253,58 @@ async function buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, samp
   return await ctx.startRendering();
 }
 
+/* ---------- ألوان الضربات للعرض المرئي ---------- */
+const HIT_COLORS = {
+  dum: "#F8A337",
+  tak: "#4FD1C5",
+  clap: "#E85D9E",
+  hat: "#D8DEE9",
+  hatO: "#A7D129",
+  crash: "#FF6B6B",
+};
+const HIT_LABELS = { dum: "دم", tak: "تك", clap: "كلاب", hat: "هاي هات", hatO: "هاي هات مفتوح", crash: "كراش" };
+/* يحسب قائمة أوقات الضربات (بدون توليف صوت) لعرضها مرئيًا — نفس منطق البناء الصوتي بالضبط */
+function computeHitList(pattern, beatGrid, startTime, endTime, bpm) {
+  const hits = [];
+  const stepsPerBeat = pattern.stepsPerBeat || 2;
+  if (beatGrid && beatGrid.length > 2) {
+    const beatsPerBar = pattern.slots.length / stepsPerBeat;
+    for (let i = 0; i < beatGrid.length - 1; i++) {
+      const b0 = beatGrid[i], b1 = beatGrid[i + 1];
+      if (b1 <= startTime) continue;
+      if (b0 >= endTime) break;
+      const beatInBar = i % beatsPerBar;
+      const barIdx = Math.floor(i / beatsPerBar);
+      const useFill = !!pattern.fill && barIdx % 4 === 3;
+      const slots = useFill ? pattern.fill : pattern.slots;
+      const beatDur = b1 - b0;
+      for (let s = 0; s < stepsPerBeat; s++) {
+        const type = slots[beatInBar * stepsPerBeat + s];
+        if (!type || type === "-") continue;
+        const t = b0 + (beatDur * s) / stepsPerBeat;
+        if (t < startTime || t >= endTime) continue;
+        hits.push({ time: t, type });
+      }
+    }
+  } else {
+    const slotDur = 60 / bpm / stepsPerBeat;
+    let t = startTime;
+    let slotIdx = 0;
+    let barIdx = 0;
+    let guard = 0;
+    while (t < endTime && guard++ < 20000) {
+      const useFill = !!pattern.fill && barIdx % 4 === 3;
+      const slots = useFill ? pattern.fill : pattern.slots;
+      const type = slots[slotIdx % pattern.slots.length];
+      if (type && type !== "-") hits.push({ time: t, type });
+      t += slotDur;
+      slotIdx++;
+      if (slotIdx % pattern.slots.length === 0) barIdx++;
+    }
+  }
+  return hits;
+}
+
 /* ---------- تحليل تلقائي: السرعة (BPM) ونقطة التنبو ---------- */
 function computeEnvelope(buffer, hopSize) {
   const data = buffer.getChannelData(0);
@@ -537,11 +589,16 @@ function computePeaks(buffer, bins) {
 function App() {
   const audioCtxRef = useRef(null);
   const canvasRef = useRef(null);
+  const rhythmCanvasRef = useRef(null);
+  const overlayCanvasRef = useRef(null);
   const containerRef = useRef(null);
+  const scrollRef = useRef(null);
   const historyRef = useRef([]);
   const clipboardRef = useRef(null);
   const previewNodesRef = useRef([]);
   const tapTimesRef = useRef([]);
+  const rafRef = useRef(null);
+  const playStartRef = useRef({ ctxTime: 0, windowStart: 0 });
 
   const [songBuffer, setSongBuffer] = useState(null);
   const [songName, setSongName] = useState("");
@@ -549,6 +606,11 @@ function App() {
   const [loadingSong, setLoadingSong] = useState(false);
   const [historyLen, setHistoryLen] = useState(0);
   const [hasClipboard, setHasClipboard] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [songFiles, setSongFiles] = useState([]);
+  const [activeSongIdx, setActiveSongIdx] = useState(-1);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchStatus, setBatchStatus] = useState("");
 
   const [category, setCategory] = useState("مصري");
   const [rhythmMode, setRhythmMode] = useState("builtin");
@@ -581,6 +643,52 @@ function App() {
     return audioCtxRef.current;
   }, []);
 
+  const startPlayhead = (ctx, windowStart) => {
+    playStartRef.current = { ctxTime: ctx.currentTime, windowStart };
+    const tick = () => {
+      const elapsed = ctx.currentTime - playStartRef.current.ctxTime;
+      const t = playStartRef.current.windowStart + elapsed;
+      drawPlayhead(t);
+      autoScrollTo(t);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  };
+  const stopPlayhead = () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    drawPlayhead(null);
+  };
+  const drawPlayhead = (t) => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas || !songBuffer) return;
+    const dpr = window.devicePixelRatio || 1;
+    const g = canvas.getContext("2d");
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, canvas.width, canvas.height);
+    if (t == null) return;
+    g.scale(dpr, dpr);
+    const width = canvas.width / dpr;
+    const height = canvas.height / dpr;
+    const x = (t / songBuffer.duration) * width;
+    g.strokeStyle = "#FFFFFF";
+    g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(x, 0);
+    g.lineTo(x, height);
+    g.stroke();
+  };
+  const autoScrollTo = (t) => {
+    const scroller = scrollRef.current;
+    if (!scroller || !songBuffer) return;
+    const width = scroller.scrollWidth;
+    const x = (t / songBuffer.duration) * width;
+    const viewW = scroller.clientWidth;
+    if (x < scroller.scrollLeft + 40 || x > scroller.scrollLeft + viewW - 40) {
+      scroller.scrollLeft = Math.max(0, x - viewW / 2);
+    }
+  };
+
   const pushHistory = (buf) => {
     historyRef.current.push(buf);
     if (historyRef.current.length > 12) historyRef.current.shift();
@@ -598,30 +706,57 @@ function App() {
     }
   };
 
-  const handleSongFile = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setLoadingSong(true);
-    setStatus("");
+  const loadSongIntoState = (buf, name) => {
+    setSongBuffer(buf);
+    setSongName(name);
+    setPeaks(computePeaks(buf, 900));
+    setStartTime(0);
+    setEndTime(buf.duration);
+    setBeatGrid([]);
+    setZoom(1);
     setDownloadUrl(null);
+    setStatus("");
     historyRef.current = [];
     setHistoryLen(0);
     clipboardRef.current = null;
     setHasClipboard(false);
+  };
+
+  const handleSongFile = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setLoadingSong(true);
     try {
       const ctx = getCtx();
-      const arr = await file.arrayBuffer();
-      const buf = await ctx.decodeAudioData(arr);
-      setSongBuffer(buf);
-      setSongName(file.name);
-      setPeaks(computePeaks(buf, 900));
-      setStartTime(0);
-      setEndTime(buf.duration);
-    } catch (err) {
-      setStatus("تعذّرت قراءة الملف الصوتي. جرّب ملف mp3 أو wav آخر.");
+      const added = [];
+      for (const file of files) {
+        try {
+          const arr = await file.arrayBuffer();
+          const buf = await ctx.decodeAudioData(arr);
+          added.push({ name: file.name, buffer: buf });
+        } catch (err) {}
+      }
+      if (!added.length) {
+        setStatus("تعذّرت قراءة الملفات. جرّب mp3 أو wav.");
+        return;
+      }
+      setSongFiles((prev) => {
+        const merged = [...prev, ...added];
+        return merged;
+      });
+      const first = added[0];
+      setActiveSongIdx(songFiles.length);
+      loadSongIntoState(first.buffer, first.name);
     } finally {
       setLoadingSong(false);
     }
+  };
+
+  const switchToSong = (idx) => {
+    const f = songFiles[idx];
+    if (!f) return;
+    setActiveSongIdx(idx);
+    loadSongIntoState(f.buffer, f.name);
   };
 
   const handleAutoAnalyze = async () => {
@@ -666,11 +801,12 @@ function App() {
   };
 
   useEffect(() => {
-    if (!peaks || !songBuffer) return;
+    if (!songBuffer) return;
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
-    const width = container.clientWidth;
+    const baseWidth = container.clientWidth;
+    const width = Math.max(baseWidth, baseWidth * zoom);
     const height = 140;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = width * dpr;
@@ -678,10 +814,13 @@ function App() {
     canvas.style.width = width + "px";
     canvas.style.height = height + "px";
     const g = canvas.getContext("2d");
+    g.setTransform(1, 0, 0, 1, 0, 0);
     g.scale(dpr, dpr);
     g.clearRect(0, 0, width, height);
 
     const duration = songBuffer.duration;
+    const bins = Math.min(6000, Math.max(900, Math.round(900 * zoom)));
+    const displayPeaks = computePeaks(songBuffer, bins);
     const startX = (startTime / duration) * width;
     const endX = (endTime / duration) * width;
 
@@ -689,11 +828,11 @@ function App() {
     g.fillRect(startX, 0, Math.max(0, endX - startX), height);
 
     const mid = height / 2;
-    const barW = width / peaks.length;
-    for (let i = 0; i < peaks.length; i++) {
+    const barW = width / displayPeaks.length;
+    for (let i = 0; i < displayPeaks.length; i++) {
       const x = i * barW;
       const inRhythm = x >= startX && x <= endX;
-      const h = Math.max(1.5, peaks[i] * (mid - 6));
+      const h = Math.max(1.5, displayPeaks[i] * (mid - 6));
       g.fillStyle = inRhythm ? COLORS.goldSoft : "rgba(244,238,224,0.35)";
       g.fillRect(x, mid - h, Math.max(1, barW - 1), h * 2);
     }
@@ -734,7 +873,55 @@ function App() {
     g.closePath();
     g.fill();
     g.fillRect(endX - 1.2, 0, 2.4, height);
-  }, [peaks, songBuffer, startTime, endTime, beatGrid]);
+
+    const overlay = overlayCanvasRef.current;
+    if (overlay) {
+      overlay.width = width * dpr;
+      overlay.height = height * dpr;
+      overlay.style.width = width + "px";
+      overlay.style.height = height + "px";
+    }
+  }, [songBuffer, startTime, endTime, beatGrid, zoom]);
+
+  useEffect(() => {
+    if (!songBuffer) return;
+    const canvas = rhythmCanvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+    const baseWidth = container.clientWidth;
+    const width = Math.max(baseWidth, baseWidth * zoom);
+    const height = 56;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+    const g = canvas.getContext("2d");
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.scale(dpr, dpr);
+    g.clearRect(0, 0, width, height);
+    g.fillStyle = "#0D0620";
+    g.fillRect(0, 0, width, height);
+
+    const duration = songBuffer.duration;
+    if (rhythmMode === "builtin") {
+      const pattern = PATTERNS.find((p) => p.id === patternId);
+      const hits = computeHitList(pattern, beatGrid, startTime, endTime, bpm);
+      for (const h of hits) {
+        const x = (h.time / duration) * width;
+        g.fillStyle = HIT_COLORS[h.type] || "#fff";
+        const r = h.type === "dum" ? 5 : 3.2;
+        g.beginPath();
+        g.arc(x, height / 2, r, 0, Math.PI * 2);
+        g.fill();
+      }
+    } else {
+      g.fillStyle = COLORS.muted;
+      g.font = "12px Cairo";
+      g.textAlign = "center";
+      g.fillText("لوب مرفوع — بدون عرض ضربات تفصيلي", width / 2, height / 2 + 4);
+    }
+  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm]);
 
   const timeFromEvent = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -839,6 +1026,7 @@ function App() {
     });
     previewNodesRef.current = [];
     setPreviewing(false);
+    stopPlayhead();
   };
   const handlePreview = async () => {
     if (!songBuffer) return;
@@ -861,7 +1049,8 @@ function App() {
       previewNodesRef.current = [src];
       setPreviewing(true);
       setStatus("");
-      src.onended = () => setPreviewing(false);
+      startPlayhead(ctx, previewStart);
+      src.onended = () => { setPreviewing(false); stopPlayhead(); };
     } catch (err) {
       setStatus("تعذّرت المعاينة: " + String(err.message || err));
     }
@@ -933,9 +1122,70 @@ function App() {
       previewNodesRef.current = [src];
       setPreviewing(true);
       setStatus("");
-      src.onended = () => setPreviewing(false);
+      startPlayhead(ctx, winStart);
+      src.onended = () => { setPreviewing(false); stopPlayhead(); };
     } catch (err) {
       setStatus("تعذّرت المعاينة: " + String(err.message || err));
+    }
+  };
+
+  const handleBatchExport = async () => {
+    if (songFiles.length < 2) return;
+    setBatchBusy(true);
+    try {
+      const ctx = getCtx();
+      for (let i = 0; i < songFiles.length; i++) {
+        const f = songFiles[i];
+        setBatchStatus(`(${i + 1}/${songFiles.length}) تحليل ${f.name}...`);
+        await new Promise((r) => setTimeout(r, 10));
+        const dBpm = detectBpm(f.buffer);
+        const dDrop = detectDrop(f.buffer);
+        const grid = detectBeatGrid(f.buffer, dBpm);
+        const sStart = Math.min(dDrop, f.buffer.duration - 0.5);
+        const sEnd = f.buffer.duration;
+
+        let rhythmBuffer;
+        if (rhythmMode === "custom") {
+          rhythmBuffer = myLoops[activeLoopIdx]?.buffer || null;
+        } else {
+          const pattern = PATTERNS.find((p) => p.id === patternId);
+          rhythmBuffer = grid.length > 2
+            ? await buildGridLockedRhythm(pattern, grid, sStart, sEnd, f.buffer.sampleRate)
+            : await buildPhraseBuffer(pattern, dBpm, f.buffer.sampleRate);
+        }
+        if (!rhythmBuffer) continue;
+
+        setBatchStatus(`(${i + 1}/${songFiles.length}) دمج ${f.name}...`);
+        let mixed = buildMix(f.buffer, rhythmBuffer, sStart, sEnd, songVol, rhythmVol, 0, f.buffer.duration);
+        limitClipping(mixed);
+        if (masterBoost) {
+          const offline = new OfflineAudioContext(mixed.numberOfChannels, mixed.length, mixed.sampleRate);
+          const src = offline.createBufferSource();
+          src.buffer = mixed;
+          const comp = offline.createDynamicsCompressor();
+          comp.threshold.value = -10; comp.knee.value = 12; comp.ratio.value = 3; comp.attack.value = 0.003; comp.release.value = 0.25;
+          src.connect(comp).connect(offline.destination);
+          src.start(0);
+          mixed = await offline.startRendering();
+          mixed = normalizePeak(mixed, -1);
+        }
+        const bitDepth = outputQuality === "high" ? 24 : 16;
+        const blob = audioBufferToWav(mixed, bitDepth);
+        const url = URL.createObjectURL(blob);
+        const base = f.name.replace(/\.[^/.]+$/, "") || `song-${i + 1}`;
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${base} - Tiger Event Mix.wav`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      setBatchStatus("✅ خلصت معالجة كل الملفات");
+    } catch (err) {
+      setBatchStatus("صار خطأ بالمعالجة الجماعية: " + String(err.message || err));
+    } finally {
+      setBatchBusy(false);
     }
   };
 
@@ -969,30 +1219,67 @@ function App() {
       <section style={styles.card}>
         <div style={styles.stepRow}><span style={styles.stepNum}>01</span><span style={styles.stepTitle}>ارفع الأغنية</span></div>
         <label style={styles.uploadBtn}>
-          {loadingSong ? "جارِ التحميل..." : songName ? "تغيير الملف" : "اختر ملف صوتي (mp3 / wav)"}
-          <input type="file" accept="audio/*" onChange={handleSongFile} style={{ display: "none" }} />
+          {loadingSong ? "جارِ التحميل..." : "اختر ملف أو أكثر (mp3 / wav)"}
+          <input type="file" accept="audio/*" multiple onChange={handleSongFile} style={{ display: "none" }} />
         </label>
-        {songName && <div style={styles.fileName}>{songName}</div>}
+
+        {songFiles.length > 1 && (
+          <div style={styles.songList}>
+            {songFiles.map((f, i) => (
+              <button key={i} onClick={() => switchToSong(i)} style={i === activeSongIdx ? styles.songChipActive : styles.songChip}>
+                {f.name}
+              </button>
+            ))}
+          </div>
+        )}
+        {songName && songFiles.length <= 1 && <div style={styles.fileName}>{songName}</div>}
 
         {songBuffer && (
           <>
-            <div style={{ marginTop: 16 }} ref={containerRef}>
-              <canvas
-                ref={canvasRef}
-                style={styles.canvas}
-                onMouseDown={onPointerDown}
-                onMouseMove={onPointerMove}
-                onMouseUp={onPointerUp}
-                onMouseLeave={onPointerUp}
-                onTouchStart={onPointerDown}
-                onTouchMove={onPointerMove}
-                onTouchEnd={onPointerUp}
-              />
+            <div style={styles.bpmBadgeRow}>
+              <span style={styles.bpmBadge}>
+                السرعة الحالية: <span className="mono">{bpm} BPM</span>
+              </span>
+              {beatGrid.length > 2 && <span style={styles.bpmBadgeOk}>✅ محاذى على النبضات الحقيقية</span>}
+            </div>
+
+            <div style={styles.zoomRow}>
+              <button onClick={() => setZoom((z) => Math.max(1, +(z / 1.6).toFixed(2)))} style={styles.zoomBtn}>－</button>
+              <span className="mono" style={styles.zoomLabel}>تكبير ×{zoom.toFixed(1)}</span>
+              <button onClick={() => setZoom((z) => Math.min(12, +(z * 1.6).toFixed(2)))} style={styles.zoomBtn}>＋</button>
+              <button onClick={() => setZoom(1)} style={styles.zoomReset}>إعادة الضبط</button>
+            </div>
+
+            <div ref={containerRef} style={{ marginTop: 8 }}>
+              <div ref={scrollRef} style={styles.scroller}>
+                <div style={{ position: "relative" }}>
+                  <canvas
+                    ref={canvasRef}
+                    style={styles.canvas}
+                    onMouseDown={onPointerDown}
+                    onMouseMove={onPointerMove}
+                    onMouseUp={onPointerUp}
+                    onMouseLeave={onPointerUp}
+                    onTouchStart={onPointerDown}
+                    onTouchMove={onPointerMove}
+                    onTouchEnd={onPointerUp}
+                  />
+                  <canvas ref={overlayCanvasRef} style={styles.overlayCanvas} />
+                </div>
+                <canvas ref={rhythmCanvasRef} style={styles.rhythmCanvas} />
+              </div>
+              <div style={styles.legendRow}>
+                {Object.keys(HIT_COLORS).map((k) => (
+                  <span key={k} style={styles.legendItem}>
+                    <span style={{ ...styles.legendDot, background: HIT_COLORS[k] }} /> {HIT_LABELS[k]}
+                  </span>
+                ))}
+              </div>
               <div style={styles.markerRow}>
                 <span><span style={{ color: COLORS.gold }}>● البداية</span> <span className="mono">{fmtTime(startTime)}</span></span>
                 <span><span style={{ color: COLORS.coral }}>● النهاية</span> <span className="mono">{fmtTime(endTime)}</span></span>
               </div>
-              <div style={styles.hint}>اسحب أقرب علامة لتحديد نطاق الإيقاع أو التحرير</div>
+              <div style={styles.hint}>اسحب أقرب علامة لتحديد النطاق — كبّر لترى تطابق كل ضربة مع الموجة، ومرر يمين/يسار للتنقل</div>
               {beatGrid.length > 0 && (
                 <label style={styles.checkRow}>
                   <input type="checkbox" checked={snapToGrid} onChange={(e) => setSnapToGrid(e.target.checked)} />
@@ -1001,9 +1288,11 @@ function App() {
               )}
             </div>
             <button onClick={handleAutoAnalyze} style={styles.analyzeBtn}>🎯 اكتشاف التنبو والجريد تلقائيًا</button>
+            <div style={styles.hint}>الكشف التلقائي تقريبي (تحليل طاقة الصوت) وممكن يخطئ بأغاني معقدة — استخدم التكبير فوق للتأكد ولتعديل العلامتين يدويًا لو احتاج الأمر</div>
           </>
         )}
       </section>
+
 
       <section style={{ ...styles.card, ...(canWork ? {} : styles.disabled) }}>
         <div style={styles.stepRow}><span style={styles.stepNum}>02</span><span style={styles.stepTitle}>تحرير دقيق (اختياري)</span></div>
@@ -1118,6 +1407,16 @@ function App() {
         </div>
         {status && <div style={styles.status}>{status}</div>}
         {downloadUrl && <a href={downloadUrl} download={downloadName} style={styles.downloadBtn}>⬇ تحميل {downloadName}</a>}
+
+        {songFiles.length > 1 && (
+          <>
+            <div style={styles.hint}>معالجة جماعية: يطبّق نفس النمط والإعدادات الحالية على كل الملفات المرفوعة، ويحلل تنبو وسرعة كل واحد لحاله تلقائيًا</div>
+            <button onClick={handleBatchExport} style={styles.batchBtn} disabled={batchBusy}>
+              {batchBusy ? "جارِ معالجة الكل..." : `⬇ تصدير كل الملفات (${songFiles.length})`}
+            </button>
+            {batchStatus && <div style={styles.status}>{batchStatus}</div>}
+          </>
+        )}
       </section>
 
       <div style={styles.footer}>Tiger Event — يشتغل كامل داخل المتصفح، الملف ما يترفع لأي سيرفر</div>
@@ -1141,6 +1440,23 @@ const styles = {
   uploadBtnSmall: { display: "inline-block", background: COLORS.panel2, border: `1px solid ${COLORS.line}`, color: COLORS.text, fontWeight: 700, padding: "10px 16px", borderRadius: 10, cursor: "pointer" },
   fileName: { marginTop: 8, color: COLORS.muted, fontSize: 13, wordBreak: "break-all" },
   canvas: { width: "100%", height: 140, borderRadius: 10, background: "#100823", display: "block", touchAction: "none" },
+  overlayCanvas: { position: "absolute", top: 0, left: 0, pointerEvents: "none", display: "block" },
+  rhythmCanvas: { width: "100%", height: 56, display: "block", marginTop: 4, borderRadius: 8 },
+  scroller: { overflowX: "auto", borderRadius: 10, WebkitOverflowScrolling: "touch" },
+  legendRow: { display: "flex", flexWrap: "wrap", gap: 10, marginTop: 8, justifyContent: "center" },
+  legendItem: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: COLORS.muted },
+  legendDot: { width: 8, height: 8, borderRadius: "50%", display: "inline-block" },
+  songList: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 },
+  songChip: { padding: "6px 12px", borderRadius: 20, border: `1px solid ${COLORS.line}`, background: "transparent", color: COLORS.muted, fontSize: 12 },
+  songChipActive: { padding: "6px 12px", borderRadius: 20, border: `1px solid ${COLORS.gold}`, background: "rgba(248,163,55,0.16)", color: COLORS.goldSoft, fontSize: 12, fontWeight: 700 },
+  bpmBadgeRow: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 14 },
+  bpmBadge: { background: COLORS.panel2, border: `1px solid ${COLORS.line}`, borderRadius: 20, padding: "6px 14px", fontSize: 13 },
+  bpmBadgeOk: { color: "#7CD992", fontSize: 12, fontWeight: 700 },
+  zoomRow: { display: "flex", alignItems: "center", gap: 8, marginTop: 10 },
+  zoomBtn: { width: 36, height: 36, borderRadius: 8, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontSize: 18, fontWeight: 700 },
+  zoomLabel: { fontSize: 12, color: COLORS.muted, minWidth: 70, textAlign: "center" },
+  zoomReset: { padding: "6px 10px", borderRadius: 8, border: `1px solid ${COLORS.line}`, background: "transparent", color: COLORS.muted, fontSize: 11 },
+  batchBtn: { display: "block", width: "100%", marginTop: 10, background: COLORS.coral, color: "#fff", fontWeight: 800, padding: "12px 14px", borderRadius: 12, border: "none", fontSize: 14 },
   markerRow: { display: "flex", justifyContent: "space-between", fontSize: 13, marginTop: 8 },
   hint: { color: COLORS.muted, fontSize: 12, marginTop: 6, textAlign: "center" },
   analyzeBtn: { display: "block", width: "100%", marginTop: 12, background: "transparent", border: `1px solid ${COLORS.gold}`, color: COLORS.goldSoft, fontWeight: 700, padding: "10px 12px", borderRadius: 10, fontSize: 13 },
