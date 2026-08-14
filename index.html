@@ -418,6 +418,111 @@ function nearestBeat(grid, t) {
   return best;
 }
 
+/* ---------- تحليل محسّن: طاقة متعددة النطاقات + Beat Tracking بالبرمجة الديناميكية (أسلوب Ellis) ---------- */
+async function computeMultiBandOnset(buffer, hopSec) {
+  const sr = buffer.sampleRate;
+  const hop = Math.max(1, Math.round(sr * hopSec));
+  const ctx = new OfflineAudioContext(3, buffer.length, sr);
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  const merger = ctx.createChannelMerger(3);
+  merger.connect(ctx.destination);
+  const low = ctx.createBiquadFilter();
+  low.type = "lowpass"; low.frequency.value = 150; low.Q.value = 0.7;
+  const mid = ctx.createBiquadFilter();
+  mid.type = "bandpass"; mid.frequency.value = 900; mid.Q.value = 0.6;
+  const high = ctx.createBiquadFilter();
+  high.type = "highpass"; high.frequency.value = 3000; high.Q.value = 0.7;
+  src.connect(low); low.connect(merger, 0, 0);
+  src.connect(mid); mid.connect(merger, 0, 1);
+  src.connect(high); high.connect(merger, 0, 2);
+  src.start(0);
+  const rendered = await ctx.startRendering();
+
+  const bands = [rendered.getChannelData(0), rendered.getChannelData(1), rendered.getChannelData(2)];
+  const n = Math.max(1, Math.floor(buffer.length / hop));
+  const bandEnv = bands.map(() => new Float32Array(n));
+  for (let b = 0; b < 3; b++) {
+    const data = bands[b];
+    for (let i = 0; i < n; i++) {
+      let sum = 0;
+      const start = i * hop;
+      for (let j = 0; j < hop; j++) {
+        const v = data[start + j] || 0;
+        sum += v * v;
+      }
+      bandEnv[b][i] = Math.sqrt(sum / hop);
+    }
+  }
+  const onset = new Float32Array(n);
+  const weights = [1.2, 0.8, 1.0];
+  for (let i = 1; i < n; i++) {
+    let s = 0;
+    for (let b = 0; b < 3; b++) s += weights[b] * Math.max(0, bandEnv[b][i] - bandEnv[b][i - 1]);
+    onset[i] = s;
+  }
+  return { onset, frameSec: hop / sr };
+}
+function estimateTempoFromOnset(onset, frameSec) {
+  const hopRate = 1 / frameSec;
+  const minLag = Math.round((hopRate * 60) / 180);
+  const maxLag = Math.round((hopRate * 60) / 70);
+  let bestLag = 0, bestScore = -1;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let score = 0;
+    for (let i = 0; i + lag < onset.length; i++) score += onset[i] * onset[i + lag];
+    if (score > bestScore) { bestScore = score; bestLag = lag; }
+  }
+  if (bestLag <= 0) return 120;
+  let bpm = Math.round((60 * hopRate) / bestLag);
+  while (bpm < 80) bpm *= 2;
+  while (bpm > 175) bpm = Math.round(bpm / 2);
+  return bpm;
+}
+/* Beat Tracking بالبرمجة الديناميكية (أسلوب Ellis 2007) — يحسب أفضل مسار نبضات كامل بدل البحث المحلي البسيط */
+function dpBeatTrack(onset, frameSec, periodFrames) {
+  const n = onset.length;
+  if (n < 4 || periodFrames < 2) return [];
+  const tightness = 100;
+  const C = new Float32Array(n);
+  const P = new Int32Array(n).fill(-1);
+  const searchMin = Math.max(1, Math.round(periodFrames * 0.5));
+  const searchMax = Math.round(periodFrames * 2);
+
+  for (let i = 0; i < n; i++) {
+    let best = -Infinity, bestTau = -1;
+    const upper = Math.min(i, searchMax);
+    const lower = Math.max(1, Math.min(i, searchMin));
+    for (let tau = upper; tau >= lower; tau--) {
+      const j = i - tau;
+      if (j < 0) break;
+      const dev = Math.log(tau / periodFrames);
+      const txcost = -tightness * dev * dev;
+      const score = C[j] + txcost;
+      if (score > best) { best = score; bestTau = tau; }
+    }
+    if (bestTau === -1) { C[i] = onset[i]; P[i] = -1; }
+    else { C[i] = onset[i] + best; P[i] = i - bestTau; }
+  }
+
+  let endIdx = 0, endVal = -Infinity;
+  for (let i = 0; i < n; i++) if (C[i] > endVal) { endVal = C[i]; endIdx = i; }
+
+  const idxs = [];
+  let cur = endIdx;
+  while (cur >= 0) { idxs.push(cur); cur = P[cur]; }
+  idxs.reverse();
+  return idxs.map((idx) => idx * frameSec);
+}
+/* التحليل الكامل: نطاقات ترددية + سرعة + جريد نبضات موثوق */
+async function analyzeRhythm(buffer) {
+  const { onset, frameSec } = await computeMultiBandOnset(buffer, 0.011);
+  const bpm = estimateTempoFromOnset(onset, frameSec);
+  const periodFrames = Math.max(2, Math.round(60 / bpm / frameSec));
+  const beatGrid = dpBeatTrack(onset, frameSec, periodFrames);
+  return { bpm, beatGrid };
+}
+
 /* ---------- تحرير دقيق: قص / نسخ / لصق / حذف ---------- */
 function sliceBuffer(buffer, startSec, endSec) {
   const sr = buffer.sampleRate;
@@ -761,12 +866,11 @@ function App() {
 
   const handleAutoAnalyze = async () => {
     if (!songBuffer) return;
-    setStatus("جارِ تحليل الأغنية وبناء جريد النبضات...");
+    setStatus("جارِ تحليل الأغنية (خوارزمية محسّنة: نطاقات ترددية + برمجة ديناميكية)...");
     await new Promise((r) => setTimeout(r, 30));
     try {
-      const detectedBpm = detectBpm(songBuffer);
+      const { bpm: detectedBpm, beatGrid: grid } = await analyzeRhythm(songBuffer);
       const dropAt = detectDrop(songBuffer);
-      const grid = detectBeatGrid(songBuffer, detectedBpm);
       const snappedStart = nearestBeat(grid, Math.min(dropAt, songBuffer.duration - 0.5));
       setBpm(detectedBpm);
       setBeatGrid(grid);
@@ -775,7 +879,7 @@ function App() {
       setEndTime(songBuffer.duration);
       setStatus(`رصدنا ${detectedBpm} BPM وجريد ${grid.length} نبضة — نقطة التنبو محاذاة على أقرب ضربة عند ${fmtTime(snappedStart)}`);
     } catch (err) {
-      setStatus("تعذّر التحليل التلقائي، حدد يدويًا من الموجة.");
+      setStatus("تعذّر التحليل التلقائي: " + String(err.message || err));
     }
   };
 
@@ -1138,9 +1242,8 @@ function App() {
         const f = songFiles[i];
         setBatchStatus(`(${i + 1}/${songFiles.length}) تحليل ${f.name}...`);
         await new Promise((r) => setTimeout(r, 10));
-        const dBpm = detectBpm(f.buffer);
+        const { bpm: dBpm, beatGrid: grid } = await analyzeRhythm(f.buffer);
         const dDrop = detectDrop(f.buffer);
-        const grid = detectBeatGrid(f.buffer, dBpm);
         const sStart = Math.min(dDrop, f.buffer.duration - 0.5);
         const sEnd = f.buffer.duration;
 
