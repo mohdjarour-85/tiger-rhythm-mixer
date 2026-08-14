@@ -381,6 +381,50 @@ function normalizePeak(buffer, targetDb) {
   }
   return buffer;
 }
+function limitClipping(buffer) {
+  let peak = 0;
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < data.length; i++) {
+      const a = Math.abs(data[i]);
+      if (a > peak) peak = a;
+    }
+  }
+  if (peak > 1) {
+    const g = 0.99 / peak;
+    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+      const data = buffer.getChannelData(ch);
+      for (let i = 0; i < data.length; i++) data[i] *= g;
+    }
+  }
+  return buffer;
+}
+/* ---------- دمج مباشر بالعينات: أوثق من جدولة تشغيل (loop/duration) عبر AudioContext ---------- */
+function buildMix(songBuffer, rhythmBuffer, rhythmStart, rhythmEnd, songVol, rhythmVol, windowStart, windowEnd) {
+  const sr = songBuffer.sampleRate;
+  const wStart = Math.max(0, Math.round(windowStart * sr));
+  const wEnd = Math.min(songBuffer.length, Math.round(windowEnd * sr));
+  const len = Math.max(1, wEnd - wStart);
+  const numChannels = Math.max(songBuffer.numberOfChannels, rhythmBuffer ? rhythmBuffer.numberOfChannels : 1, 1);
+  const out = new AudioBuffer({ length: len, numberOfChannels: numChannels, sampleRate: sr });
+  const rStart = Math.round(rhythmStart * sr);
+  const rEnd = Math.round(rhythmEnd * sr);
+  const rLen = rhythmBuffer ? rhythmBuffer.length : 0;
+  for (let ch = 0; ch < numChannels; ch++) {
+    const songCh = ch < songBuffer.numberOfChannels ? songBuffer.getChannelData(ch) : songBuffer.getChannelData(0);
+    const rhyCh = rhythmBuffer ? (ch < rhythmBuffer.numberOfChannels ? rhythmBuffer.getChannelData(ch) : rhythmBuffer.getChannelData(0)) : null;
+    const dst = out.getChannelData(ch);
+    for (let i = 0; i < len; i++) {
+      const g = wStart + i;
+      let v = (g < songBuffer.length ? songCh[g] : 0) * songVol;
+      if (rhyCh && rLen > 0 && g >= rStart && g < rEnd) {
+        v += rhyCh[(g - rStart) % rLen] * rhythmVol;
+      }
+      dst[i] = v;
+    }
+  }
+  return out;
+}
 
 /* ---------- تصدير WAV (16 أو 24 بت) ---------- */
 function audioBufferToWav(buffer, bitDepth) {
@@ -761,35 +805,27 @@ function App() {
     if (!songBuffer) return;
     stopPreview();
     setStatus("جارِ تجهيز المعاينة...");
-    const rhythmBuffer = await buildRhythmBuffer();
-    if (!rhythmBuffer) return setStatus("");
-    const ctx = getCtx();
-    const previewStart = Math.max(0, startTime - 2);
-    const previewDur = Math.min(8, songBuffer.duration - previewStart);
+    await new Promise((r) => setTimeout(r, 10));
+    try {
+      const rhythmBuffer = await buildRhythmBuffer();
+      if (!rhythmBuffer) return setStatus("");
+      const ctx = getCtx();
+      const previewStart = Math.max(0, startTime - 2);
+      const previewEnd = Math.min(songBuffer.duration, previewStart + 18);
+      const mixBuf = buildMix(songBuffer, rhythmBuffer, startTime, endTime, songVol, rhythmVol, previewStart, previewEnd);
+      limitClipping(mixBuf);
 
-    const songSrc = ctx.createBufferSource();
-    songSrc.buffer = songBuffer;
-    const songGain = ctx.createGain();
-    songGain.gain.value = songVol;
-    songSrc.connect(songGain).connect(ctx.destination);
-    songSrc.start(ctx.currentTime, previewStart, previewDur);
-
-    const rhySrc = ctx.createBufferSource();
-    rhySrc.buffer = rhythmBuffer;
-    rhySrc.loop = true;
-    rhySrc.loopEnd = rhythmBuffer.duration;
-    const rhyGain = ctx.createGain();
-    rhyGain.gain.value = rhythmVol;
-    rhySrc.connect(rhyGain).connect(ctx.destination);
-    const delay = Math.max(0, startTime - previewStart);
-    const rhythmPlayDur = Math.max(0, Math.min(previewDur - delay, endTime - startTime));
-    if (rhythmPlayDur > 0) rhySrc.start(ctx.currentTime + delay, 0, rhythmPlayDur);
-
-    previewNodesRef.current = [songSrc, rhySrc];
-    setPreviewing(true);
-    setStatus("");
-    songSrc.onended = () => setPreviewing(false);
-    setTimeout(() => setPreviewing(false), previewDur * 1000 + 50);
+      const src = ctx.createBufferSource();
+      src.buffer = mixBuf;
+      src.connect(ctx.destination);
+      src.start();
+      previewNodesRef.current = [src];
+      setPreviewing(true);
+      setStatus("");
+      src.onended = () => setPreviewing(false);
+    } catch (err) {
+      setStatus("تعذّرت المعاينة: " + String(err.message || err));
+    }
   };
 
   const handleRender = async () => {
@@ -803,46 +839,29 @@ function App() {
       if (!rhythmBuffer) { setBusy(false); return; }
       setStatus("جارِ دمج الإيقاع مع الأغنية الكاملة...");
 
-      const outSr = outputQuality === "high" ? 48000 : songBuffer.sampleRate;
-      const outLength = Math.ceil(songBuffer.duration * outSr);
-      const offline = new OfflineAudioContext(2, outLength, outSr);
+      let mixed = buildMix(songBuffer, rhythmBuffer, startTime, endTime, songVol, rhythmVol, 0, songBuffer.duration);
+      limitClipping(mixed);
 
-      const bus = masterBoost ? offline.createDynamicsCompressor() : null;
-      if (bus) {
-        bus.threshold.value = -10;
-        bus.knee.value = 12;
-        bus.ratio.value = 3;
-        bus.attack.value = 0.003;
-        bus.release.value = 0.25;
-        bus.connect(offline.destination);
-      }
-      const outNode = bus || offline.destination;
-
-      const songSrc = offline.createBufferSource();
-      songSrc.buffer = songBuffer;
-      const songGain = offline.createGain();
-      songGain.gain.value = songVol;
-      songSrc.connect(songGain).connect(outNode);
-      songSrc.start(0);
-
-      const rhySrc = offline.createBufferSource();
-      rhySrc.buffer = rhythmBuffer;
-      rhySrc.loop = true;
-      rhySrc.loopEnd = rhythmBuffer.duration;
-      const rhyGain = offline.createGain();
-      rhyGain.gain.value = rhythmVol;
-      rhySrc.connect(rhyGain).connect(outNode);
-      const dur = Math.max(0, endTime - startTime);
-      if (dur > 0) rhySrc.start(startTime, 0, dur);
-
-      let rendered = await offline.startRendering();
       if (masterBoost) {
         setStatus("جارِ تلميع وتقوية الصوت النهائي...");
-        rendered = normalizePeak(rendered, -1);
+        const offline = new OfflineAudioContext(mixed.numberOfChannels, mixed.length, mixed.sampleRate);
+        const src = offline.createBufferSource();
+        src.buffer = mixed;
+        const comp = offline.createDynamicsCompressor();
+        comp.threshold.value = -10;
+        comp.knee.value = 12;
+        comp.ratio.value = 3;
+        comp.attack.value = 0.003;
+        comp.release.value = 0.25;
+        src.connect(comp).connect(offline.destination);
+        src.start(0);
+        mixed = await offline.startRendering();
+        mixed = normalizePeak(mixed, -1);
       }
+
       setStatus("جارِ تجهيز ملف WAV للتحميل...");
       const bitDepth = outputQuality === "high" ? 24 : 16;
-      const blob = audioBufferToWav(rendered, bitDepth);
+      const blob = audioBufferToWav(mixed, bitDepth);
       const url = URL.createObjectURL(blob);
       const base = songName.replace(/\.[^/.]+$/, "") || "الأغنية";
       setDownloadUrl(url);
@@ -852,6 +871,32 @@ function App() {
       setStatus("صار خطأ أثناء المعالجة: " + String(err.message || err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handlePreviewFull = async () => {
+    if (!songBuffer) return;
+    stopPreview();
+    setStatus("جارِ تجهيز معاينة المقطع كامل...");
+    await new Promise((r) => setTimeout(r, 10));
+    try {
+      const rhythmBuffer = await buildRhythmBuffer();
+      if (!rhythmBuffer) return setStatus("");
+      const ctx = getCtx();
+      const winStart = Math.max(0, startTime - 1);
+      const winEnd = Math.min(songBuffer.duration, endTime + 1);
+      const mixBuf = buildMix(songBuffer, rhythmBuffer, startTime, endTime, songVol, rhythmVol, winStart, winEnd);
+      limitClipping(mixBuf);
+      const src = ctx.createBufferSource();
+      src.buffer = mixBuf;
+      src.connect(ctx.destination);
+      src.start();
+      previewNodesRef.current = [src];
+      setPreviewing(true);
+      setStatus("");
+      src.onended = () => setPreviewing(false);
+    } catch (err) {
+      setStatus("تعذّرت المعاينة: " + String(err.message || err));
     }
   };
 
@@ -998,19 +1043,19 @@ function App() {
 
         <div style={styles.sliderBlock}>
           <div style={styles.sliderLabel}><span>صوت الأغنية الأصلية</span><span className="mono">{Math.round(songVol * 100)}٪</span></div>
-          <input type="range" min={0} max={1.4} step={0.01} value={songVol} onChange={(e) => setSongVol(Number(e.target.value))} style={{ width: "100%" }} />
+          <input type="range" min={0} max={2} step={0.01} value={songVol} onChange={(e) => setSongVol(Number(e.target.value))} style={{ width: "100%" }} />
         </div>
         <div style={styles.sliderBlock}>
           <div style={styles.sliderLabel}><span>صوت الإيقاع المُضاف</span><span className="mono">{Math.round(rhythmVol * 100)}٪</span></div>
-          <input type="range" min={0} max={1.4} step={0.01} value={rhythmVol} onChange={(e) => setRhythmVol(Number(e.target.value))} style={{ width: "100%" }} />
+          <input type="range" min={0} max={2} step={0.01} value={rhythmVol} onChange={(e) => setRhythmVol(Number(e.target.value))} style={{ width: "100%" }} />
         </div>
       </section>
 
       <section style={{ ...styles.card, ...(canWork ? {} : styles.disabled) }}>
         <div style={styles.stepRow}><span style={styles.stepNum}>05</span><span style={styles.stepTitle}>جودة الإخراج</span></div>
         <div style={styles.toggleRow}>
-          <button onClick={() => setOutputQuality("standard")} style={outputQuality === "standard" ? styles.toggleActive : styles.toggle}>قياسية 44.1kHz</button>
-          <button onClick={() => setOutputQuality("high")} style={outputQuality === "high" ? styles.toggleActive : styles.toggle}>عالية 48kHz / 24bit</button>
+          <button onClick={() => setOutputQuality("standard")} style={outputQuality === "standard" ? styles.toggleActive : styles.toggle}>قياسية 16-bit</button>
+          <button onClick={() => setOutputQuality("high")} style={outputQuality === "high" ? styles.toggleActive : styles.toggle}>عالية 24-bit</button>
         </div>
         <label style={styles.checkRow}>
           <input type="checkbox" checked={masterBoost} onChange={(e) => setMasterBoost(e.target.checked)} />
@@ -1022,7 +1067,10 @@ function App() {
         <div style={styles.stepRow}><span style={styles.stepNum}>06</span><span style={styles.stepTitle}>معاينة وتصدير</span></div>
         <div style={styles.actionRow}>
           <button onClick={previewing ? stopPreview : handlePreview} style={styles.secondaryBtn} disabled={busy}>
-            {previewing ? "إيقاف المعاينة" : "▶ معاينة سريعة"}
+            {previewing ? "إيقاف المعاينة" : "▶ معاينة سريعة (18 ثانية)"}
+          </button>
+          <button onClick={previewing ? stopPreview : handlePreviewFull} style={styles.secondaryBtn} disabled={busy}>
+            {previewing ? "إيقاف المعاينة" : "▶ معاينة المقطع كامل"}
           </button>
           <button onClick={handleRender} style={styles.primaryBtn} disabled={busy}>
             {busy ? "جارِ المعالجة..." : "تصدير وتحميل الميكس"}
