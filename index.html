@@ -572,10 +572,26 @@ function dpBeatTrackAdaptive(onset, frameSec, periodFramesArr) {
   return idxs.map((idx) => idx * frameSec);
 }
 /* التحليل الكامل: نطاقات ترددية + منحنى سرعة متحرك (يعيد القراءة كل ٣ ثوانٍ) + جريد نبضات متكيّف */
+/* أكثر قيمة BPM تكرارًا بين نوافذ منحنى السرعة — أثبت من رقم واحد محسوب على الأغنية كاملة دفعة وحدة،
+   لأن التحليل الشامل يتوه لو فيه مقدمة هادئة أو أجزاء بدون إيقاع واضح */
+function modeOfTempoCurve(curve) {
+  const counts = new Map();
+  for (let i = 0; i < curve.length; i++) {
+    const v = Math.round(curve[i]);
+    if (!v) continue;
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  let bestV = null, bestC = -1;
+  for (const [v, c] of counts) {
+    if (c > bestC) { bestC = c; bestV = v; }
+  }
+  return bestV;
+}
 async function analyzeRhythm(buffer) {
   const { onset, frameSec } = await computeMultiBandOnset(buffer, 0.011);
-  const globalBpm = estimateTempoFromOnset(onset, frameSec);
+  const initialBpm = estimateTempoFromOnset(onset, frameSec);
   const tempoCurve = estimateTempoCurve(onset, frameSec, 6, 3);
+  const globalBpm = modeOfTempoCurve(tempoCurve) || initialBpm;
   const periodFramesArr = new Float32Array(onset.length);
   for (let i = 0; i < onset.length; i++) {
     periodFramesArr[i] = Math.max(2, Math.round(60 / (tempoCurve[i] || globalBpm) / frameSec));
