@@ -10,6 +10,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia-wasm.web.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia.js-core.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>html,body,#root{margin:0;padding:0;min-height:100vh;}</style>
 </head>
 <body>
@@ -881,6 +882,41 @@ function buildMix(songBuffer, rhythmBuffer, rhythmStart, rhythmEnd, songVol, rhy
   return out;
 }
 
+/* ---------- تصدير MP3 عبر lamejs (تشفير بالمتصفح، بدون سيرفر) ---------- */
+function floatTo16BitPCM(floatArr) {
+  const out = new Int16Array(floatArr.length);
+  for (let i = 0; i < floatArr.length; i++) {
+    let s = Math.max(-1, Math.min(1, floatArr[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+function audioBufferToMp3(buffer, kbps) {
+  if (typeof lamejs === "undefined") throw new Error("مكتبة تصدير MP3 ما تحمّلت (تحقق من الاتصال بالإنترنت)");
+  kbps = kbps || 192;
+  const numChannels = Math.min(2, buffer.numberOfChannels);
+  const sampleRate = buffer.sampleRate;
+  const encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, kbps);
+  const blockSize = 1152;
+  const left = floatTo16BitPCM(buffer.getChannelData(0));
+  const right = numChannels > 1 ? floatTo16BitPCM(buffer.getChannelData(1)) : null;
+  const chunks = [];
+  for (let i = 0; i < left.length; i += blockSize) {
+    const leftChunk = left.subarray(i, i + blockSize);
+    let mp3buf;
+    if (numChannels > 1) {
+      const rightChunk = right.subarray(i, i + blockSize);
+      mp3buf = encoder.encodeBuffer(leftChunk, rightChunk);
+    } else {
+      mp3buf = encoder.encodeBuffer(leftChunk);
+    }
+    if (mp3buf.length > 0) chunks.push(mp3buf);
+  }
+  const end = encoder.flush();
+  if (end.length > 0) chunks.push(end);
+  return new Blob(chunks, { type: "audio/mp3" });
+}
+
 /* ---------- تصدير WAV (16 أو 24 بت) ---------- */
 function audioBufferToWav(buffer, bitDepth) {
   const numChannels = buffer.numberOfChannels;
@@ -1020,6 +1056,8 @@ function App() {
   const [outputQuality, setOutputQuality] = useState("high");
   const [outputSR, setOutputSR] = useState(48000);
   const [masterBoost, setMasterBoost] = useState(true);
+  const [outputFormat, setOutputFormat] = useState("wav");
+  const [mp3Kbps, setMp3Kbps] = useState(192);
 
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1679,13 +1717,20 @@ function App() {
         limitClipping(mixed);
       }
 
-      setStatus("جارِ تجهيز ملف WAV للتحميل...");
-      const bitDepth = outputQuality === "high" ? 24 : 16;
-      const blob = audioBufferToWav(mixed, bitDepth);
-      const url = URL.createObjectURL(blob);
+      setStatus(outputFormat === "mp3" ? "جارِ تجهيز ملف MP3 للتحميل..." : "جارِ تجهيز ملف WAV للتحميل...");
       const base = songName.replace(/\.[^/.]+$/, "") || "الأغنية";
+      let blob, ext;
+      if (outputFormat === "mp3") {
+        blob = audioBufferToMp3(mixed, mp3Kbps);
+        ext = "mp3";
+      } else {
+        const bitDepth = outputQuality === "high" ? 24 : 16;
+        blob = audioBufferToWav(mixed, bitDepth);
+        ext = "wav";
+      }
+      const url = URL.createObjectURL(blob);
       setDownloadUrl(url);
-      setDownloadName(`${base} - Tiger Event Mix.wav`);
+      setDownloadName(`${base} - Tiger Event Mix.${ext}`);
       setStatus("جاهز! اضغط تحميل الميكس.");
     } catch (err) {
       setStatus("صار خطأ أثناء المعالجة: " + String(err.message || err));
@@ -2273,18 +2318,39 @@ function App() {
       <section style={{ ...styles.card, ...(canWork ? {} : styles.disabled) }}>
         <div style={styles.stepRow}><span style={styles.stepNum}>05</span><span style={styles.stepTitle}>جودة الإخراج</span></div>
 
-        <div style={styles.hint}>معدل العينة (Sample Rate)</div>
+        <div style={styles.hint}>صيغة الملف</div>
+        <div style={styles.toggleRow}>
+          <button onClick={() => setOutputFormat("wav")} style={outputFormat === "wav" ? styles.toggleActive : styles.toggle}>WAV (جودة كاملة، حجم أكبر)</button>
+          <button onClick={() => setOutputFormat("mp3")} style={outputFormat === "mp3" ? styles.toggleActive : styles.toggle}>MP3 (حجم أصغر، مناسب للمشاركة)</button>
+        </div>
+
+        {outputFormat === "mp3" && (
+          <div style={{ marginTop: 10 }}>
+            <div style={styles.hint}>جودة MP3 (kbps)</div>
+            <div style={styles.toggleRow}>
+              <button onClick={() => setMp3Kbps(128)} style={mp3Kbps === 128 ? styles.toggleActive : styles.toggle}>128</button>
+              <button onClick={() => setMp3Kbps(192)} style={mp3Kbps === 192 ? styles.toggleActive : styles.toggle}>192</button>
+              <button onClick={() => setMp3Kbps(320)} style={mp3Kbps === 320 ? styles.toggleActive : styles.toggle}>320</button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ ...styles.hint, marginTop: 14 }}>معدل العينة (Sample Rate)</div>
         <div style={styles.toggleRow}>
           <button onClick={() => setOutputSR(0)} style={outputSR === 0 ? styles.toggleActive : styles.toggle}>أصلي (بدون تحويل)</button>
           <button onClick={() => setOutputSR(44100)} style={outputSR === 44100 ? styles.toggleActive : styles.toggle}>44.1kHz</button>
           <button onClick={() => setOutputSR(48000)} style={outputSR === 48000 ? styles.toggleActive : styles.toggle}>48kHz</button>
         </div>
 
-        <div style={{ ...styles.hint, marginTop: 14 }}>عمق البت (Bit Depth)</div>
-        <div style={styles.toggleRow}>
-          <button onClick={() => setOutputQuality("standard")} style={outputQuality === "standard" ? styles.toggleActive : styles.toggle}>16-bit</button>
-          <button onClick={() => setOutputQuality("high")} style={outputQuality === "high" ? styles.toggleActive : styles.toggle}>24-bit</button>
-        </div>
+        {outputFormat === "wav" && (
+          <>
+            <div style={{ ...styles.hint, marginTop: 14 }}>عمق البت (Bit Depth)</div>
+            <div style={styles.toggleRow}>
+              <button onClick={() => setOutputQuality("standard")} style={outputQuality === "standard" ? styles.toggleActive : styles.toggle}>16-bit</button>
+              <button onClick={() => setOutputQuality("high")} style={outputQuality === "high" ? styles.toggleActive : styles.toggle}>24-bit</button>
+            </div>
+          </>
+        )}
 
         <label style={styles.checkRow}>
           <input type="checkbox" checked={masterBoost} onChange={(e) => setMasterBoost(e.target.checked)} />
