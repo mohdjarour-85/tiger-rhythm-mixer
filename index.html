@@ -411,6 +411,28 @@ function detectBeatGrid(buffer, expectedBpm) {
   }
   return beats;
 }
+/* تصحيح كثافة الجريد يدويًا: لو الكشف التلقائي طلع بضعف/نص عدد النبضات الحقيقية،
+   هالدوال تعدّل الجريد نفسه (مو بس رقم الـ BPM) عشان الإيقاع يتزامن فعليًا مع الأغنية */
+function halveGridDensity(grid) {
+  if (!grid || grid.length < 4) return grid;
+  return grid.filter((_, i) => i % 2 === 0);
+}
+function doubleGridDensity(grid) {
+  if (!grid || grid.length < 2) return grid;
+  const out = [];
+  for (let i = 0; i < grid.length; i++) {
+    out.push(grid[i]);
+    if (i < grid.length - 1) out.push((grid[i] + grid[i + 1]) / 2);
+  }
+  return out;
+}
+function averageGridBpm(grid) {
+  if (!grid || grid.length < 2) return null;
+  let total = 0;
+  for (let i = 1; i < grid.length; i++) total += grid[i] - grid[i - 1];
+  const avg = total / (grid.length - 1);
+  return avg > 0 ? Math.round(60 / avg) : null;
+}
 function nearestBeat(grid, t) {
   if (!grid || grid.length === 0) return t;
   let best = grid[0], bestDist = Math.abs(grid[0] - t);
@@ -1897,6 +1919,42 @@ function App() {
               <div>
                 <div className="mono" style={styles.bpmValue}>{bpm} BPM</div>
                 <input type="range" min={60} max={180} value={bpm} onChange={(e) => setBpm(Number(e.target.value))} style={{ width: 160 }} />
+                <div style={styles.bpmHalveRow}>
+                  <button
+                    type="button"
+                    style={styles.bpmHalveBtn}
+                    onClick={() => {
+                      if (beatGrid.length > 3) {
+                        const g = halveGridDensity(beatGrid);
+                        setBeatGrid(g);
+                        setBpm(averageGridBpm(g) || Math.max(60, Math.round(bpm / 2)));
+                        setStatus("تم تصحيح الجريد: نصّفنا عدد النبضات — جرّب المعاينة الحين");
+                      } else {
+                        setBpm((b) => Math.max(60, Math.round(b / 2)));
+                      }
+                    }}
+                    title="نصّف كثافة النبضات — استخدمها لو الإيقاع يطلع أسرع من اللازم (ضعف السرعة الحقيقية)"
+                  >
+                    ÷2
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.bpmHalveBtn}
+                    onClick={() => {
+                      if (beatGrid.length > 1) {
+                        const g = doubleGridDensity(beatGrid);
+                        setBeatGrid(g);
+                        setBpm(averageGridBpm(g) || Math.min(180, Math.round(bpm * 2)));
+                        setStatus("تم تصحيح الجريد: ضاعفنا عدد النبضات — جرّب المعاينة الحين");
+                      } else {
+                        setBpm((b) => Math.min(180, Math.round(b * 2)));
+                      }
+                    }}
+                    title="ضاعف كثافة النبضات — استخدمها لو الإيقاع يطلع أبطأ من اللازم (نص السرعة الحقيقية)"
+                  >
+                    ×2
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -2034,6 +2092,8 @@ const styles = {
   bpmRow: { marginBottom: 18 },
   tempoWrap: { display: "flex", alignItems: "center", gap: 16 },
   tapBtn: { position: "relative", width: 64, height: 64, borderRadius: "50%", background: COLORS.coral, color: "#fff", border: "none", fontWeight: 800, fontSize: 14, overflow: "visible" },
+  bpmHalveRow: { display: "flex", gap: 6, marginTop: 6 },
+  bpmHalveBtn: { flex: 1, padding: "4px 0", borderRadius: 6, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontWeight: 700, fontSize: 12, cursor: "pointer" },
   pulseCore: { position: "absolute", inset: 0, borderRadius: "50%", border: `2px solid ${COLORS.coral}`, animationName: "pulseRing", animationIterationCount: "infinite", animationTimingFunction: "ease-out" },
   bpmValue: { fontSize: 18, fontWeight: 600, marginBottom: 6 },
   sliderBlock: { marginBottom: 14 },
