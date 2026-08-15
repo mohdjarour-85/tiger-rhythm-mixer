@@ -1494,8 +1494,14 @@ function App() {
     if (!dragging || !songBuffer) return;
     let t = timeFromEvent(e);
     if (snapToGrid && beatGrid.length > 0) t = nearestBeat(beatGrid, t);
-    if (dragging === "start") setStartTime(Math.min(t, endTime));
-    else setEndTime(Math.max(t, startTime + 0.05));
+    if (dragging === "start") {
+      const v = Math.min(t, endTime);
+      setStartTime(v);
+      setRhythmAnchorSec(v);
+      setRhythmBeatGrid(buildForwardGrid(v, bpm, songBuffer.duration));
+    } else {
+      setEndTime(Math.max(t, startTime + 0.05));
+    }
   };
   const onPointerUp = () => setDragging(null);
 
@@ -1919,7 +1925,14 @@ function App() {
                   <input
                     type="number" step="0.01" className="mono"
                     value={Number(startTime.toFixed(2))}
-                    onChange={(e) => setStartTime(Math.min(Number(e.target.value) || 0, endTime))}
+                    onChange={(e) => {
+                      const v = Math.min(Number(e.target.value) || 0, endTime);
+                      setStartTime(v);
+                      if (songBuffer) {
+                        setRhythmAnchorSec(v);
+                        setRhythmBeatGrid(buildForwardGrid(v, bpm, songBuffer.duration));
+                      }
+                    }}
                     style={styles.numInput}
                   />
                 </div>
@@ -1935,7 +1948,14 @@ function App() {
               </div>
 
               <button
-                onClick={() => setStartTime(beatGrid.length > 0 ? nearestBeat(beatGrid, 0) : 0)}
+                onClick={() => {
+                  const v = beatGrid.length > 0 ? nearestBeat(beatGrid, 0) : 0;
+                  setStartTime(v);
+                  if (songBuffer) {
+                    setRhythmAnchorSec(v);
+                    setRhythmBeatGrid(buildForwardGrid(v, bpm, songBuffer.duration));
+                  }
+                }}
                 style={styles.startFromZeroBtn}
               >
                 ⏮ البداية من أول الأغنية (0:00)
