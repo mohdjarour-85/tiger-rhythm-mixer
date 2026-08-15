@@ -218,8 +218,9 @@ async function buildPhraseBuffer(pattern, bpm, sampleRate) {
   return concatBuffers([normalBar, normalBar, normalBar, fillBar]);
 }
 /* يبني الإيقاع بالمحاذاة الحقيقية: كل دم/تك يُحسب ويُحط بالضبط على وقت النبضة الفعلية بالجريد، بدل سرعة ثابتة مفترضة */
-async function buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, sampleRate) {
+async function buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, sampleRate, offsetSec) {
   if (!beatGrid || beatGrid.length < 3) return null;
+  offsetSec = offsetSec || 0;
   const stepsPerBeat = pattern.stepsPerBeat || 2;
   const beatsPerBar = pattern.slots.length / stepsPerBeat;
   const duration = Math.max(0.05, endTime - startTime);
@@ -227,8 +228,7 @@ async function buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, samp
   const ctx = new OfflineAudioContext(2, length, sampleRate);
 
   for (let i = 0; i < beatGrid.length - 1; i++) {
-    const b0 = beatGrid[i];
-    const b1 = beatGrid[i + 1];
+    const b0 = beatGrid[i], b1 = beatGrid[i + 1];
     if (b1 <= startTime) continue;
     if (b0 >= endTime) break;
     const beatInBar = i % beatsPerBar;
@@ -239,7 +239,7 @@ async function buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, samp
     for (let s = 0; s < stepsPerBeat; s++) {
       const type = slots[beatInBar * stepsPerBeat + s];
       if (!type || type === "-") continue;
-      const tReal = b0 + (beatDur * s) / stepsPerBeat;
+      const tReal = b0 + (beatDur * s) / stepsPerBeat + offsetSec;
       if (tReal < startTime || tReal >= endTime) continue;
       const tLocal = tReal - startTime;
       if (type === "dum") hitDum(ctx, tLocal);
@@ -264,7 +264,8 @@ const HIT_COLORS = {
 };
 const HIT_LABELS = { dum: "دم", tak: "تك", clap: "كلاب", hat: "هاي هات", hatO: "هاي هات مفتوح", crash: "كراش" };
 /* يحسب قائمة أوقات الضربات (بدون توليف صوت) لعرضها مرئيًا — نفس منطق البناء الصوتي بالضبط */
-function computeHitList(pattern, beatGrid, startTime, endTime, bpm) {
+function computeHitList(pattern, beatGrid, startTime, endTime, bpm, offsetSec) {
+  offsetSec = offsetSec || 0;
   const hits = [];
   const stepsPerBeat = pattern.stepsPerBeat || 2;
   if (beatGrid && beatGrid.length > 2) {
@@ -281,14 +282,14 @@ function computeHitList(pattern, beatGrid, startTime, endTime, bpm) {
       for (let s = 0; s < stepsPerBeat; s++) {
         const type = slots[beatInBar * stepsPerBeat + s];
         if (!type || type === "-") continue;
-        const t = b0 + (beatDur * s) / stepsPerBeat;
+        const t = b0 + (beatDur * s) / stepsPerBeat + offsetSec;
         if (t < startTime || t >= endTime) continue;
         hits.push({ time: t, type });
       }
     }
   } else {
     const slotDur = 60 / bpm / stepsPerBeat;
-    let t = startTime;
+    let t = startTime + offsetSec;
     let slotIdx = 0;
     let barIdx = 0;
     let guard = 0;
@@ -296,7 +297,7 @@ function computeHitList(pattern, beatGrid, startTime, endTime, bpm) {
       const useFill = !!pattern.fill && barIdx % 4 === 3;
       const slots = useFill ? pattern.fill : pattern.slots;
       const type = slots[slotIdx % pattern.slots.length];
-      if (type && type !== "-") hits.push({ time: t, type });
+      if (type && type !== "-" && t >= startTime) hits.push({ time: t, type });
       t += slotDur;
       slotIdx++;
       if (slotIdx % pattern.slots.length === 0) barIdx++;
@@ -729,6 +730,7 @@ function App() {
   const [dragging, setDragging] = useState(null);
   const [beatGrid, setBeatGrid] = useState([]);
   const [snapToGrid, setSnapToGrid] = useState(true);
+  const [syncOffsetMs, setSyncOffsetMs] = useState(0);
 
   const [songVol, setSongVol] = useState(1);
   const [rhythmVol, setRhythmVol] = useState(0.85);
@@ -911,7 +913,7 @@ function App() {
     if (!canvas || !container) return;
     const baseWidth = container.clientWidth;
     const width = Math.max(baseWidth, baseWidth * zoom);
-    const height = 140;
+    const height = 220;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
@@ -923,7 +925,7 @@ function App() {
     g.clearRect(0, 0, width, height);
 
     const duration = songBuffer.duration;
-    const bins = Math.min(6000, Math.max(900, Math.round(900 * zoom)));
+    const bins = Math.min(20000, Math.max(900, Math.round(900 * zoom)));
     const displayPeaks = computePeaks(songBuffer, bins);
     const startX = (startTime / duration) * width;
     const endX = (endTime / duration) * width;
@@ -994,7 +996,7 @@ function App() {
     if (!canvas || !container) return;
     const baseWidth = container.clientWidth;
     const width = Math.max(baseWidth, baseWidth * zoom);
-    const height = 56;
+    const height = 64;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
@@ -1008,24 +1010,58 @@ function App() {
     g.fillRect(0, 0, width, height);
 
     const duration = songBuffer.duration;
+    const offsetSec = syncOffsetMs / 1000;
     if (rhythmMode === "builtin") {
       const pattern = PATTERNS.find((p) => p.id === patternId);
-      const hits = computeHitList(pattern, beatGrid, startTime, endTime, bpm);
+      const hits = computeHitList(pattern, beatGrid, startTime, endTime, bpm, offsetSec);
       for (const h of hits) {
         const x = (h.time / duration) * width;
         g.fillStyle = HIT_COLORS[h.type] || "#fff";
-        const r = h.type === "dum" ? 5 : 3.2;
+        const r = h.type === "dum" ? 6 : 4;
         g.beginPath();
         g.arc(x, height / 2, r, 0, Math.PI * 2);
         g.fill();
       }
     } else {
-      g.fillStyle = COLORS.muted;
-      g.font = "12px Cairo";
-      g.textAlign = "center";
-      g.fillText("لوب مرفوع — بدون عرض ضربات تفصيلي", width / 2, height / 2 + 4);
+      const loop = myLoops[activeLoopIdx];
+      if (loop && loop.buffer) {
+        const rStart = startTime + offsetSec;
+        const rEnd = endTime + offsetSec;
+        const rLen = loop.buffer.length;
+        const sr = loop.buffer.sampleRate;
+        const loopPeaks = computePeaks(loop.buffer, Math.max(60, Math.round(200 * (loop.buffer.duration || 1))));
+        const startX = (rStart / duration) * width;
+        const endX = (rEnd / duration) * width;
+        g.fillStyle = "rgba(226,96,79,0.08)";
+        g.fillRect(startX, 0, Math.max(0, endX - startX), height);
+        const stepSec = 0.02;
+        for (let t = Math.max(0, rStart); t < Math.min(duration, rEnd); t += stepSec) {
+          const phase = ((t - rStart) * sr) % rLen;
+          const bin = Math.min(loopPeaks.length - 1, Math.floor((phase / rLen) * loopPeaks.length));
+          const amp = loopPeaks[bin];
+          const x = (t / duration) * width;
+          const h = Math.max(1, amp * (height / 2 - 4));
+          g.fillStyle = COLORS.coral;
+          g.fillRect(x, height / 2 - h, 1.5, h * 2);
+        }
+        g.strokeStyle = "rgba(255,255,255,0.5)";
+        g.lineWidth = 1;
+        const loopDur = loop.buffer.duration;
+        for (let t = rStart; t < rEnd; t += loopDur) {
+          const x = (t / duration) * width;
+          g.beginPath();
+          g.moveTo(x, 0);
+          g.lineTo(x, height);
+          g.stroke();
+        }
+      } else {
+        g.fillStyle = COLORS.muted;
+        g.font = "12px Cairo";
+        g.textAlign = "center";
+        g.fillText("ارفع لوب من قسم \"لوباتي الخاصة\" حتى يظهر هنا", width / 2, height / 2 + 4);
+      }
     }
-  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm]);
+  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm, myLoops, activeLoopIdx, syncOffsetMs]);
 
   const timeFromEvent = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -1108,21 +1144,23 @@ function App() {
 
   const buildRhythmBuffer = useCallback(async () => {
     if (!songBuffer) return null;
+    const offsetSec = syncOffsetMs / 1000;
     if (rhythmMode === "custom") {
       const loop = myLoops[activeLoopIdx];
       if (!loop) {
         setStatus("ارفع لوب إيقاعي أو اختر نمطًا جاهزًا.");
         return null;
       }
-      return loop.buffer;
+      return { buffer: loop.buffer, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
     }
     const pattern = PATTERNS.find((p) => p.id === patternId);
     if (beatGrid.length > 2) {
-      const locked = await buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, songBuffer.sampleRate);
-      if (locked) return locked;
+      const locked = await buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, songBuffer.sampleRate, offsetSec);
+      if (locked) return { buffer: locked, rStart: startTime, rEnd: endTime };
     }
-    return await buildPhraseBuffer(pattern, bpm, songBuffer.sampleRate);
-  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime]);
+    const phrase = await buildPhraseBuffer(pattern, bpm, songBuffer.sampleRate);
+    return { buffer: phrase, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
+  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime, syncOffsetMs]);
 
   const stopPreview = () => {
     previewNodesRef.current.forEach((n) => {
@@ -1138,12 +1176,12 @@ function App() {
     setStatus("جارِ تجهيز المعاينة...");
     await new Promise((r) => setTimeout(r, 10));
     try {
-      const rhythmBuffer = await buildRhythmBuffer();
-      if (!rhythmBuffer) return setStatus("");
+      const rhy = await buildRhythmBuffer();
+      if (!rhy) return setStatus("");
       const ctx = getCtx();
       const previewStart = Math.max(0, startTime - 2);
       const previewEnd = Math.min(songBuffer.duration, previewStart + 18);
-      const mixBuf = buildMix(songBuffer, rhythmBuffer, startTime, endTime, songVol, rhythmVol, previewStart, previewEnd);
+      const mixBuf = buildMix(songBuffer, rhy.buffer, rhy.rStart, rhy.rEnd, songVol, rhythmVol, previewStart, previewEnd);
       limitClipping(mixBuf);
 
       const src = ctx.createBufferSource();
@@ -1167,11 +1205,11 @@ function App() {
     setDownloadUrl(null);
     setStatus("جارِ توليف الإيقاع...");
     try {
-      const rhythmBuffer = await buildRhythmBuffer();
-      if (!rhythmBuffer) { setBusy(false); return; }
+      const rhy = await buildRhythmBuffer();
+      if (!rhy) { setBusy(false); return; }
       setStatus("جارِ دمج الإيقاع مع الأغنية الكاملة...");
 
-      let mixed = buildMix(songBuffer, rhythmBuffer, startTime, endTime, songVol, rhythmVol, 0, songBuffer.duration);
+      let mixed = buildMix(songBuffer, rhy.buffer, rhy.rStart, rhy.rEnd, songVol, rhythmVol, 0, songBuffer.duration);
       limitClipping(mixed);
 
       if (masterBoost) {
@@ -1212,12 +1250,12 @@ function App() {
     setStatus("جارِ تجهيز معاينة المقطع كامل...");
     await new Promise((r) => setTimeout(r, 10));
     try {
-      const rhythmBuffer = await buildRhythmBuffer();
-      if (!rhythmBuffer) return setStatus("");
+      const rhy = await buildRhythmBuffer();
+      if (!rhy) return setStatus("");
       const ctx = getCtx();
       const winStart = Math.max(0, startTime - 1);
       const winEnd = Math.min(songBuffer.duration, endTime + 1);
-      const mixBuf = buildMix(songBuffer, rhythmBuffer, startTime, endTime, songVol, rhythmVol, winStart, winEnd);
+      const mixBuf = buildMix(songBuffer, rhy.buffer, rhy.rStart, rhy.rEnd, songVol, rhythmVol, winStart, winEnd);
       limitClipping(mixBuf);
       const src = ctx.createBufferSource();
       src.buffer = mixBuf;
@@ -1248,18 +1286,26 @@ function App() {
         const sEnd = f.buffer.duration;
 
         let rhythmBuffer;
+        let rStart = sStart, rEnd = sEnd;
+        const offsetSec = syncOffsetMs / 1000;
         if (rhythmMode === "custom") {
           rhythmBuffer = myLoops[activeLoopIdx]?.buffer || null;
+          rStart = sStart + offsetSec;
+          rEnd = sEnd + offsetSec;
         } else {
           const pattern = PATTERNS.find((p) => p.id === patternId);
-          rhythmBuffer = grid.length > 2
-            ? await buildGridLockedRhythm(pattern, grid, sStart, sEnd, f.buffer.sampleRate)
-            : await buildPhraseBuffer(pattern, dBpm, f.buffer.sampleRate);
+          if (grid.length > 2) {
+            rhythmBuffer = await buildGridLockedRhythm(pattern, grid, sStart, sEnd, f.buffer.sampleRate, offsetSec);
+          } else {
+            rhythmBuffer = await buildPhraseBuffer(pattern, dBpm, f.buffer.sampleRate);
+            rStart = sStart + offsetSec;
+            rEnd = sEnd + offsetSec;
+          }
         }
         if (!rhythmBuffer) continue;
 
         setBatchStatus(`(${i + 1}/${songFiles.length}) دمج ${f.name}...`);
-        let mixed = buildMix(f.buffer, rhythmBuffer, sStart, sEnd, songVol, rhythmVol, 0, f.buffer.duration);
+        let mixed = buildMix(f.buffer, rhythmBuffer, rStart, rEnd, songVol, rhythmVol, 0, f.buffer.duration);
         limitClipping(mixed);
         if (masterBoost) {
           const offline = new OfflineAudioContext(mixed.numberOfChannels, mixed.length, mixed.sampleRate);
@@ -1349,7 +1395,7 @@ function App() {
             <div style={styles.zoomRow}>
               <button onClick={() => setZoom((z) => Math.max(1, +(z / 1.6).toFixed(2)))} style={styles.zoomBtn}>－</button>
               <span className="mono" style={styles.zoomLabel}>تكبير ×{zoom.toFixed(1)}</span>
-              <button onClick={() => setZoom((z) => Math.min(12, +(z * 1.6).toFixed(2)))} style={styles.zoomBtn}>＋</button>
+              <button onClick={() => setZoom((z) => Math.min(80, +(z * 1.6).toFixed(2)))} style={styles.zoomBtn}>＋</button>
               <button onClick={() => setZoom(1)} style={styles.zoomReset}>إعادة الضبط</button>
             </div>
 
@@ -1382,6 +1428,41 @@ function App() {
                 <span><span style={{ color: COLORS.gold }}>● البداية</span> <span className="mono">{fmtTime(startTime)}</span></span>
                 <span><span style={{ color: COLORS.coral }}>● النهاية</span> <span className="mono">{fmtTime(endTime)}</span></span>
               </div>
+
+              <div style={styles.numRow}>
+                <div style={styles.numField}>
+                  <label style={styles.numLabel}>بداية (ثانية)</label>
+                  <input
+                    type="number" step="0.01" className="mono"
+                    value={Number(startTime.toFixed(2))}
+                    onChange={(e) => setStartTime(Math.min(Number(e.target.value) || 0, endTime))}
+                    style={styles.numInput}
+                  />
+                </div>
+                <div style={styles.numField}>
+                  <label style={styles.numLabel}>نهاية (ثانية)</label>
+                  <input
+                    type="number" step="0.01" className="mono"
+                    value={Number(endTime.toFixed(2))}
+                    onChange={(e) => setEndTime(Math.max(Number(e.target.value) || 0, startTime + 0.05))}
+                    style={styles.numInput}
+                  />
+                </div>
+              </div>
+
+              <div style={styles.sliderBlock}>
+                <div style={styles.sliderLabel}>
+                  <span>تصحيح التوقيت بالسمع (تزحزح الإيقاع كامل)</span>
+                  <span className="mono">{syncOffsetMs > 0 ? "+" : ""}{syncOffsetMs} ms</span>
+                </div>
+                <input type="range" min={-300} max={300} step={5} value={syncOffsetMs} onChange={(e) => setSyncOffsetMs(Number(e.target.value))} style={{ width: "100%" }} />
+                <div style={styles.hint}>لو الإيقاع يجي "متأخر" بالسمع حرّك يمين، ولو "مبكر" حرّك يسار — يعدّل بدون إعادة تحليل</div>
+              </div>
+
+              <button onClick={previewing ? stopPreview : handlePreview} style={styles.quickPreviewBtn}>
+                {previewing ? "⏹ إيقاف المعاينة" : "▶ معاينة سريعة الآن"}
+              </button>
+
               <div style={styles.hint}>اسحب أقرب علامة لتحديد النطاق — كبّر لترى تطابق كل ضربة مع الموجة، ومرر يمين/يسار للتنقل</div>
               {beatGrid.length > 0 && (
                 <label style={styles.checkRow}>
@@ -1391,8 +1472,9 @@ function App() {
               )}
             </div>
             <button onClick={handleAutoAnalyze} style={styles.analyzeBtn}>🎯 اكتشاف التنبو والجريد تلقائيًا</button>
-            <div style={styles.hint}>الكشف التلقائي تقريبي (تحليل طاقة الصوت) وممكن يخطئ بأغاني معقدة — استخدم التكبير فوق للتأكد ولتعديل العلامتين يدويًا لو احتاج الأمر</div>
+            <div style={styles.hint}>الكشف التلقائي تقريبي (تحليل طاقة الصوت) وممكن يخطئ بأغاني معقدة — استخدم التكبير والخانات الرقمية فوق للتأكد وللتعديل الدقيق، ومزلاق تصحيح التوقيت لو حسّيت الإيقاع مو مزبوط بالسمع</div>
           </>
+
         )}
       </section>
 
@@ -1561,6 +1643,11 @@ const styles = {
   zoomReset: { padding: "6px 10px", borderRadius: 8, border: `1px solid ${COLORS.line}`, background: "transparent", color: COLORS.muted, fontSize: 11 },
   batchBtn: { display: "block", width: "100%", marginTop: 10, background: COLORS.coral, color: "#fff", fontWeight: 800, padding: "12px 14px", borderRadius: 12, border: "none", fontSize: 14 },
   markerRow: { display: "flex", justifyContent: "space-between", fontSize: 13, marginTop: 8 },
+  numRow: { display: "flex", gap: 10, marginTop: 10 },
+  numField: { flex: 1 },
+  numLabel: { display: "block", fontSize: 11, color: COLORS.muted, marginBottom: 4 },
+  numInput: { width: "100%", padding: "9px 10px", borderRadius: 8, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontSize: 14 },
+  quickPreviewBtn: { display: "block", width: "100%", marginTop: 12, padding: "12px", borderRadius: 10, border: "none", background: COLORS.gold, color: "#1B1030", fontWeight: 800, fontSize: 14 },
   hint: { color: COLORS.muted, fontSize: 12, marginTop: 6, textAlign: "center" },
   analyzeBtn: { display: "block", width: "100%", marginTop: 12, background: "transparent", border: `1px solid ${COLORS.gold}`, color: COLORS.goldSoft, fontWeight: 700, padding: "10px 12px", borderRadius: 10, fontSize: 13 },
   editRow: { display: "flex", gap: 8, flexWrap: "wrap" },
