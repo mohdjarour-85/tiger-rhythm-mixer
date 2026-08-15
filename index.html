@@ -600,6 +600,17 @@ async function analyzeRhythm(buffer) {
   return { bpm: globalBpm, beatGrid };
 }
 
+/* بناء الجريد على سرعة معروفة (كتبها المستخدم يدويًا أو دقّها بزر "دق") بدل تخمين السرعة تلقائيًا.
+   نثبّت الفترة بين النبضات على هالسرعة، ونخلي الخوارزمية تدوّر بس على مكان النبضات الفعلية
+   حوالين هالفترة — بدل ما تحاول تخمّن السرعة نفسها (وهو الجزء اللي يغلط بأغاني كثيرة). */
+async function analyzeRhythmWithKnownBpm(buffer, knownBpm) {
+  const { onset, frameSec } = await computeMultiBandOnset(buffer, 0.011);
+  const periodFrames = Math.max(2, Math.round(60 / knownBpm / frameSec));
+  const periodFramesArr = new Float32Array(onset.length).fill(periodFrames);
+  const beatGrid = dpBeatTrackAdaptive(onset, frameSec, periodFramesArr);
+  return { bpm: knownBpm, beatGrid };
+}
+
 /* ---------- تحرير دقيق: قص / نسخ / لصق / حذف ---------- */
 /* تمديد/تقصير زمني بإعادة أخذ العينات — يطابق التوقيت بدقة، مع تغيّر بسيط بطبقة الصوت عند نسب التمدد الكبيرة */
 function stretchBuffer(buffer, ratio) {
@@ -1112,6 +1123,29 @@ function App() {
       setStatus(`تم تحديث الجريد للمقطع المحدد فقط (${segGrid.length} ضربة) — أدق لأنه ركّز على هالجزء بس`);
     } catch (err) {
       setStatus("تعذّر إعادة التحليل: " + String(err.message || err));
+    }
+  };
+
+  const handleAnalyzeWithKnownBpm = async () => {
+    if (!songBuffer) return;
+    if (!bpm || bpm < 40) return setStatus("حدد رقم BPM صحيح أول (اكتبه بالشريط أو دقّه بزر \"دق\")");
+    setStatus(`جارِ بناء الجريد على سرعة ${bpm} BPM (بدون تخمين السرعة)...`);
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+      const { beatGrid: grid } = await analyzeRhythmWithKnownBpm(songBuffer, bpm);
+      setBeatGrid(grid);
+      setRhythmBeatGrid(grid);
+      setRhythmAnchorSec(grid.length ? grid[0] : 0);
+      setSnapToGrid(true);
+      if (moveStartToDrop) {
+        const dropAt = detectDrop(songBuffer);
+        const snappedStart = nearestBeat(grid, Math.min(dropAt, songBuffer.duration - 0.5));
+        setStartTime(snappedStart);
+        setEndTime(songBuffer.duration);
+      }
+      setStatus(`تم بناء جريد ${grid.length} نبضة على سرعة ${bpm} BPM اللي حددتها — أدق من التخمين التلقائي`);
+    } catch (err) {
+      setStatus("تعذّر بناء الجريد: " + String(err.message || err));
     }
   };
 
@@ -2020,6 +2054,17 @@ function App() {
                     ×2
                   </button>
                 </div>
+                <div style={styles.knownBpmRow}>
+                  <input
+                    type="number" className="mono" style={{ ...styles.numInput, width: 70 }}
+                    value={bpm}
+                    onChange={(e) => setBpm(Math.max(40, Math.min(220, Number(e.target.value) || 0)))}
+                  />
+                  <button type="button" onClick={handleAnalyzeWithKnownBpm} style={styles.knownBpmBtn}>
+                    🎯 ابحث عن جريد الأغنية بهذا الـBPM
+                  </button>
+                </div>
+                <div style={styles.hint}>لو الكشف التلقائي غلط، اكتب السرعة الصحيحة اللي تعرفها (أو دقّها بزر "دق") واضغط الزر — يبني الجريد على أساسها مباشرة بدون تخمين</div>
               </div>
             </div>
           </div>
@@ -2158,6 +2203,8 @@ const styles = {
   tapBtn: { position: "relative", width: 64, height: 64, borderRadius: "50%", background: COLORS.coral, color: "#fff", border: "none", fontWeight: 800, fontSize: 14, overflow: "visible" },
   bpmHalveRow: { display: "flex", gap: 6, marginTop: 6 },
   bpmSubLabel: { fontSize: 11, color: COLORS.muted, fontWeight: 500 },
+  knownBpmRow: { display: "flex", gap: 6, marginTop: 8, alignItems: "center" },
+  knownBpmBtn: { flex: 1, padding: "8px 10px", borderRadius: 8, border: `1px solid ${COLORS.gold}`, background: "transparent", color: COLORS.goldSoft, fontWeight: 700, fontSize: 12, cursor: "pointer" },
   rhythmAnchorBox: { marginTop: 8, padding: 10, borderRadius: 10, border: `1px dashed ${COLORS.line}`, background: "rgba(255,255,255,0.03)" },
   bpmHalveBtn: { flex: 1, padding: "4px 0", borderRadius: 6, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontWeight: 700, fontSize: 12, cursor: "pointer" },
   pulseCore: { position: "absolute", inset: 0, borderRadius: "50%", border: `2px solid ${COLORS.coral}`, animationName: "pulseRing", animationIterationCount: "infinite", animationTimingFunction: "ease-out" },
