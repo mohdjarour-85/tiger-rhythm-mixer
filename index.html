@@ -480,24 +480,43 @@ function estimateTempoFromOnset(onset, frameSec) {
   while (bpm > 175) bpm = Math.round(bpm / 2);
   return bpm;
 }
-/* Beat Tracking بالبرمجة الديناميكية (أسلوب Ellis 2007) — يحسب أفضل مسار نبضات كامل بدل البحث المحلي البسيط */
-function dpBeatTrack(onset, frameSec, periodFrames) {
+/* منحنى سرعة متحرك: يعيد تقدير BPM كل نافذة قصيرة طول الأغنية بدل رقم ثابت واحد — يتابع أي تغيّر بالسرعة */
+function estimateTempoCurve(onset, frameSec, windowSec, hopSec) {
+  const winFrames = Math.max(20, Math.round(windowSec / frameSec));
+  const hopFrames = Math.max(1, Math.round(hopSec / frameSec));
+  const curve = new Float32Array(onset.length);
+  let lastBpm = 120;
+  for (let start = 0; start < onset.length; start += hopFrames) {
+    const end = Math.min(onset.length, start + winFrames);
+    if (end - start >= 20) {
+      const seg = onset.subarray(start, end);
+      const bpm = estimateTempoFromOnset(seg, frameSec);
+      if (bpm) lastBpm = bpm;
+    }
+    for (let i = start; i < Math.min(onset.length, start + hopFrames); i++) curve[i] = lastBpm;
+  }
+  for (let i = 0; i < curve.length; i++) if (!curve[i]) curve[i] = lastBpm;
+  return curve;
+}
+/* Beat Tracking بالبرمجة الديناميكية (أسلوب Ellis 2007) مع سرعة متغيّرة لكل نقطة بدل قيمة ثابتة — يعيد ضبط نفسه طول الأغنية */
+function dpBeatTrackAdaptive(onset, frameSec, periodFramesArr) {
   const n = onset.length;
-  if (n < 4 || periodFrames < 2) return [];
+  if (n < 4) return [];
   const tightness = 100;
   const C = new Float32Array(n);
   const P = new Int32Array(n).fill(-1);
-  const searchMin = Math.max(1, Math.round(periodFrames * 0.5));
-  const searchMax = Math.round(periodFrames * 2);
 
   for (let i = 0; i < n; i++) {
+    const period = Math.max(2, periodFramesArr[i] || periodFramesArr[periodFramesArr.length - 1] || 20);
+    const searchMin = Math.max(1, Math.round(period * 0.5));
+    const searchMax = Math.round(period * 2);
     let best = -Infinity, bestTau = -1;
     const upper = Math.min(i, searchMax);
     const lower = Math.max(1, Math.min(i, searchMin));
     for (let tau = upper; tau >= lower; tau--) {
       const j = i - tau;
       if (j < 0) break;
-      const dev = Math.log(tau / periodFrames);
+      const dev = Math.log(tau / period);
       const txcost = -tightness * dev * dev;
       const score = C[j] + txcost;
       if (score > best) { best = score; bestTau = tau; }
@@ -515,13 +534,17 @@ function dpBeatTrack(onset, frameSec, periodFrames) {
   idxs.reverse();
   return idxs.map((idx) => idx * frameSec);
 }
-/* التحليل الكامل: نطاقات ترددية + سرعة + جريد نبضات موثوق */
+/* التحليل الكامل: نطاقات ترددية + منحنى سرعة متحرك (يعيد القراءة كل ٣ ثوانٍ) + جريد نبضات متكيّف */
 async function analyzeRhythm(buffer) {
   const { onset, frameSec } = await computeMultiBandOnset(buffer, 0.011);
-  const bpm = estimateTempoFromOnset(onset, frameSec);
-  const periodFrames = Math.max(2, Math.round(60 / bpm / frameSec));
-  const beatGrid = dpBeatTrack(onset, frameSec, periodFrames);
-  return { bpm, beatGrid };
+  const globalBpm = estimateTempoFromOnset(onset, frameSec);
+  const tempoCurve = estimateTempoCurve(onset, frameSec, 6, 3);
+  const periodFramesArr = new Float32Array(onset.length);
+  for (let i = 0; i < onset.length; i++) {
+    periodFramesArr[i] = Math.max(2, Math.round(60 / (tempoCurve[i] || globalBpm) / frameSec));
+  }
+  const beatGrid = dpBeatTrackAdaptive(onset, frameSec, periodFramesArr);
+  return { bpm: globalBpm, beatGrid };
 }
 
 /* ---------- تحرير دقيق: قص / نسخ / لصق / حذف ---------- */
@@ -542,6 +565,48 @@ function stretchBuffer(buffer, ratio) {
   }
   return out;
 }
+/* تمديد مع الحفاظ على طبقة الصوت (OLA — Overlap-Add) — تجريبي، أنسب للإيقاعات القصيرة من الأصوات المستمرة */
+function pitchPreservingStretch(buffer, ratio) {
+  const sr = buffer.sampleRate;
+  const frameSize = Math.max(256, Math.round(sr * 0.046));
+  const synthHop = Math.max(1, Math.round(frameSize / 4));
+  const analysisHop = Math.max(1, Math.round(synthHop / ratio));
+  const numChannels = buffer.numberOfChannels;
+  const inLen = buffer.length;
+  const outLen = Math.max(1, Math.round(inLen * ratio));
+
+  const window = new Float32Array(frameSize);
+  for (let i = 0; i < frameSize; i++) {
+    window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (frameSize - 1));
+  }
+
+  const out = new AudioBuffer({ length: outLen, numberOfChannels: numChannels, sampleRate: sr });
+
+  for (let ch = 0; ch < numChannels; ch++) {
+    const src = buffer.getChannelData(ch);
+    const dst = out.getChannelData(ch);
+    const weight = new Float32Array(outLen);
+
+    let readPos = 0;
+    let writePos = 0;
+    while (writePos < outLen && readPos < inLen) {
+      for (let k = 0; k < frameSize; k++) {
+        const si = readPos + k;
+        const oi = writePos + k;
+        if (si < inLen && oi < outLen) {
+          dst[oi] += src[si] * window[k];
+          weight[oi] += window[k];
+        }
+      }
+      readPos += analysisHop;
+      writePos += synthHop;
+    }
+    for (let i = 0; i < outLen; i++) {
+      if (weight[i] > 0.0001) dst[i] /= weight[i];
+    }
+  }
+  return out;
+}
 function averageBeatInterval(beatGrid, startTime, endTime) {
   const intervals = [];
   for (let i = 0; i < beatGrid.length - 1; i++) {
@@ -550,12 +615,12 @@ function averageBeatInterval(beatGrid, startTime, endTime) {
   if (!intervals.length) return null;
   return intervals.reduce((a, b) => a + b, 0) / intervals.length;
 }
-function getSyncedLoopBuffer(loopBuffer, beatGrid, startTime, endTime, bpm, beatsPerLoop) {
+function getSyncedLoopBuffer(loopBuffer, beatGrid, startTime, endTime, bpm, beatsPerLoop, preservePitch) {
   const avg = averageBeatInterval(beatGrid, startTime, endTime) || 60 / bpm;
   const targetDur = beatsPerLoop * avg;
   const ratio = targetDur / loopBuffer.duration;
   if (!isFinite(ratio) || ratio < 0.25 || ratio > 4) return loopBuffer;
-  return stretchBuffer(loopBuffer, ratio);
+  return preservePitch ? pitchPreservingStretch(loopBuffer, ratio) : stretchBuffer(loopBuffer, ratio);
 }
 
 function sliceBuffer(buffer, startSec, endSec) {
@@ -771,6 +836,7 @@ function App() {
   const [activeLoopIdx, setActiveLoopIdx] = useState(0);
   const [loopBeatsCount, setLoopBeatsCount] = useState(4);
   const [loopSyncEnabled, setLoopSyncEnabled] = useState(true);
+  const [preservePitch, setPreservePitch] = useState(false);
 
   const [bpm, setBpm] = useState(120);
   const [startTime, setStartTime] = useState(0);
@@ -918,7 +984,7 @@ function App() {
 
   const handleAutoAnalyze = async () => {
     if (!songBuffer) return;
-    setStatus("جارِ تحليل الأغنية (خوارزمية محسّنة: نطاقات ترددية + برمجة ديناميكية)...");
+    setStatus("جارِ تحليل الأغنية (منحنى سرعة متحرك + برمجة ديناميكية)...");
     await new Promise((r) => setTimeout(r, 30));
     try {
       const { bpm: detectedBpm, beatGrid: grid } = await analyzeRhythm(songBuffer);
@@ -932,6 +998,26 @@ function App() {
       setStatus(`رصدنا ${detectedBpm} BPM وجريد ${grid.length} نبضة — نقطة التنبو محاذاة على أقرب ضربة عند ${fmtTime(snappedStart)}`);
     } catch (err) {
       setStatus("تعذّر التحليل التلقائي: " + String(err.message || err));
+    }
+  };
+
+  const handleReanalyzeRange = async () => {
+    if (!songBuffer) return;
+    if (endTime <= startTime) return setStatus("حدد مقطع بالسحب على الموجة قبل إعادة التحليل");
+    setStatus("جارِ إعادة تحليل المقطع المحدد فقط...");
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+      const padStart = Math.max(0, startTime - 1);
+      const padEnd = Math.min(songBuffer.duration, endTime + 1);
+      const segment = sliceBuffer(songBuffer, padStart, padEnd);
+      const { bpm: segBpm, beatGrid: segGrid } = await analyzeRhythm(segment);
+      const shifted = segGrid.map((t) => t + padStart);
+      const merged = beatGrid.filter((t) => t < padStart || t > padEnd).concat(shifted).sort((a, b) => a - b);
+      setBpm(segBpm);
+      setBeatGrid(merged);
+      setStatus(`تم تحديث الجريد للمقطع المحدد فقط (${segGrid.length} ضربة) — أدق لأنه ركّز على هالجزء بس`);
+    } catch (err) {
+      setStatus("تعذّر إعادة التحليل: " + String(err.message || err));
     }
   };
 
@@ -1090,7 +1176,7 @@ function App() {
     } else {
       const loop = myLoops[activeLoopIdx];
       if (loop && loop.buffer) {
-        const activeBuf = loopSyncEnabled ? getSyncedLoopBuffer(loop.buffer, beatGrid, startTime, endTime, bpm, loopBeatsCount) : loop.buffer;
+        const activeBuf = loopSyncEnabled ? getSyncedLoopBuffer(loop.buffer, beatGrid, startTime, endTime, bpm, loopBeatsCount, preservePitch) : loop.buffer;
         const rStart = startTime + offsetSec;
         const rEnd = endTime + offsetSec;
         const rLen = activeBuf.length;
@@ -1127,7 +1213,7 @@ function App() {
         g.fillText("ارفع لوب من قسم \"لوباتي الخاصة\" حتى يظهر هنا", width / 2, height / 2 + 4);
       }
     }
-  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm, myLoops, activeLoopIdx, syncOffsetMs, loopSyncEnabled, loopBeatsCount]);
+  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm, myLoops, activeLoopIdx, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch]);
 
   const timeFromEvent = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -1218,7 +1304,7 @@ function App() {
         return null;
       }
       const buf = loopSyncEnabled
-        ? getSyncedLoopBuffer(loop.buffer, beatGrid, startTime, endTime, bpm, loopBeatsCount)
+        ? getSyncedLoopBuffer(loop.buffer, beatGrid, startTime, endTime, bpm, loopBeatsCount, preservePitch)
         : loop.buffer;
       return { buffer: buf, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
     }
@@ -1229,7 +1315,7 @@ function App() {
     }
     const phrase = await buildPhraseBuffer(pattern, bpm, songBuffer.sampleRate);
     return { buffer: phrase, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
-  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime, syncOffsetMs, loopSyncEnabled, loopBeatsCount]);
+  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch]);
 
   const stopPreview = () => {
     previewNodesRef.current.forEach((n) => {
@@ -1365,7 +1451,7 @@ function App() {
         const offsetSec = syncOffsetMs / 1000;
         if (rhythmMode === "custom") {
           const loop = myLoops[activeLoopIdx];
-          rhythmBuffer = loop ? (loopSyncEnabled ? getSyncedLoopBuffer(loop.buffer, grid, sStart, sEnd, dBpm, loopBeatsCount) : loop.buffer) : null;
+          rhythmBuffer = loop ? (loopSyncEnabled ? getSyncedLoopBuffer(loop.buffer, grid, sStart, sEnd, dBpm, loopBeatsCount, preservePitch) : loop.buffer) : null;
           rStart = sStart + offsetSec;
           rEnd = sEnd + offsetSec;
         } else {
@@ -1563,8 +1649,11 @@ function App() {
                 </label>
               )}
             </div>
-            <button onClick={handleAutoAnalyze} style={styles.analyzeBtn}>🎯 اكتشاف التنبو والجريد تلقائيًا</button>
-            <div style={styles.hint}>الكشف التلقائي تقريبي (تحليل طاقة الصوت) وممكن يخطئ بأغاني معقدة — استخدم التكبير والخانات الرقمية فوق للتأكد وللتعديل الدقيق، ومزلاق تصحيح التوقيت لو حسّيت الإيقاع مو مزبوط بالسمع</div>
+            <button onClick={handleAutoAnalyze} style={styles.analyzeBtn}>🎯 اكتشاف التنبو والجريد تلقائيًا (الأغنية كاملة)</button>
+            {beatGrid.length > 0 && (
+              <button onClick={handleReanalyzeRange} style={styles.reanalyzeBtn}>🔄 إعادة تحليل المقطع المحدد فقط (أدق)</button>
+            )}
+            <div style={styles.hint}>التحليل الكامل يعيد تقدير السرعة كل ٣ ثوانٍ طول الأغنية (مو رقم ثابت). لو جزء معيّن لسا مو مزبوط، حدده بالسحب واضغط "إعادة تحليل المقطع" — يركّز التحليل عليه لحاله بدقة أعلى</div>
           </>
 
         )}
@@ -1646,7 +1735,15 @@ function App() {
                     <div style={styles.hint}>
                       طول اللوب الأصلي: {myLoops[activeLoopIdx].buffer.duration.toFixed(2)} ثانية — سيتمدد/يتقصّر تلقائيًا ليطابق سرعة الأغنية المكتشفة
                     </div>
-                    <div style={styles.hint}>⚠️ التمديد يغيّر طبقة الصوت شوي عند فروقات السرعة الكبيرة (مثل تسريع/تبطيء شريط)</div>
+                    <label style={styles.checkRow}>
+                      <input type="checkbox" checked={preservePitch} onChange={(e) => setPreservePitch(e.target.checked)} />
+                      🎵 الحفاظ على طبقة الصوت أثناء التمديد (تجريبي)
+                    </label>
+                    <div style={styles.hint}>
+                      {preservePitch
+                        ? "⚠️ وضع تجريبي — قد تسمع طنين خفيف بفروقات السرعة الكبيرة، جرّبه بالمعاينة قبل التصدير"
+                        : "⚠️ التمديد يغيّر طبقة الصوت شوي عند فروقات السرعة الكبيرة (مثل تسريع/تبطيء شريط)"}
+                    </div>
                   </>
                 )}
               </div>
@@ -1778,6 +1875,7 @@ const styles = {
   quickPreviewBtn: { display: "block", width: "100%", marginTop: 12, padding: "12px", borderRadius: 10, border: "none", background: COLORS.gold, color: "#1B1030", fontWeight: 800, fontSize: 14 },
   hint: { color: COLORS.muted, fontSize: 12, marginTop: 6, textAlign: "center" },
   analyzeBtn: { display: "block", width: "100%", marginTop: 12, background: "transparent", border: `1px solid ${COLORS.gold}`, color: COLORS.goldSoft, fontWeight: 700, padding: "10px 12px", borderRadius: 10, fontSize: 13 },
+  reanalyzeBtn: { display: "block", width: "100%", marginTop: 8, background: "transparent", border: `1px solid ${COLORS.coral}`, color: "#8FB4E0", fontWeight: 700, padding: "10px 12px", borderRadius: 10, fontSize: 13 },
   editRow: { display: "flex", gap: 8, flexWrap: "wrap" },
   editBtn: { flex: "1 1 90px", padding: "10px 8px", borderRadius: 10, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontWeight: 700, fontSize: 12.5 },
   toggleRow: { display: "flex", gap: 8, marginBottom: 14 },
