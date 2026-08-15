@@ -1423,7 +1423,7 @@ function App() {
   const filteredPatterns = PATTERNS.filter((p) => p.category === category);
 
   return (
-    <div style={styles.page}>
+    <div style={styles.page} className="app-page">
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;800&family=IBM+Plex+Mono:wght@500&display=swap');
         * { box-sizing: border-box; font-family: 'Cairo', sans-serif; }
@@ -1436,12 +1436,20 @@ function App() {
         @keyframes pulseRing { 0% { transform: scale(0.85); opacity: 0.9; } 60% { transform: scale(1.5); opacity: 0; } 100% { opacity: 0; } }
         button { cursor: pointer; font-family: 'Cairo', sans-serif; }
         button:disabled { cursor: not-allowed; opacity: 0.4; }
+        @media (min-width: 900px) {
+          :root { --card-max: 860px; --subtitle-max: 680px; }
+          .app-title { font-size: 40px !important; }
+          .app-page { padding-top: 48px !important; }
+        }
+        @media (min-width: 1300px) {
+          :root { --card-max: 1080px; --subtitle-max: 760px; }
+        }
       `}</style>
 
       <div style={styles.header}>
         <img src={LOGO_DATA_URI} alt="Tiger Event" style={styles.logoImg} />
         <div style={styles.eyebrow}>TIGER EVENT</div>
-        <h1 style={styles.title}>مُوَقِّع الإيقاع</h1>
+        <h1 style={styles.title} className="app-title">مُوَقِّع الإيقاع</h1>
         <p style={styles.subtitle}>عشر إيقاعات بتقسيمات تلقائية، تحليل تنبو، تحرير دقيق، وإخراج بجودة عالية</p>
       </div>
 
@@ -1735,8 +1743,8 @@ const styles = {
   logoImg: { width: 220, maxWidth: "80%", height: "auto", margin: "0 auto 10px", display: "block" },
   eyebrow: { color: COLORS.coral, letterSpacing: 3, fontSize: 12, fontWeight: 700, marginBottom: 6 },
   title: { fontSize: 30, fontWeight: 800, margin: "0 0 8px" },
-  subtitle: { color: COLORS.muted, fontSize: 13.5, maxWidth: 400, margin: "0 auto", lineHeight: 1.8 },
-  card: { background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 16, padding: 18, maxWidth: 520, margin: "0 auto 16px" },
+  subtitle: { color: COLORS.muted, fontSize: 13.5, maxWidth: "var(--subtitle-max, 400px)", margin: "0 auto", lineHeight: 1.8 },
+  card: { background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 16, padding: 18, maxWidth: "var(--card-max, 520px)", margin: "0 auto 16px" },
   disabled: { opacity: 0.5, pointerEvents: "none" },
   stepRow: { display: "flex", alignItems: "center", gap: 10, marginBottom: 14 },
   stepNum: { color: COLORS.gold, fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600 },
