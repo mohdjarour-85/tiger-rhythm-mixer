@@ -448,6 +448,16 @@ function buildEvenGrid(anchorSec, bpm, durationSec) {
   while (t < durationSec) { grid.push(t); t += interval; }
   return grid;
 }
+/* جريد يبدأ حرفيًا من نقطة الإرساء فقط (بدون نبضات قبلها) — للاستخدام لما المستخدم يحدد
+   بنفسه "من وين يبدأ" الإيقاع، عكس buildEvenGrid اللي يمدّ الجريد لقبل وبعد النقطة */
+function buildForwardGrid(anchorSec, bpm, durationSec) {
+  const interval = 60 / bpm;
+  if (!(interval > 0) || !(durationSec > 0)) return [];
+  const grid = [];
+  let t = Math.max(0, anchorSec);
+  while (t < durationSec) { grid.push(t); t += interval; }
+  return grid;
+}
 function nearestBeat(grid, t) {
   if (!grid || grid.length === 0) return t;
   let best = grid[0], bestDist = Math.abs(grid[0] - t);
@@ -985,6 +995,7 @@ function App() {
   const [patternId, setPatternId] = useState("maqsoum");
   const [patternPhase, setPatternPhase] = useState(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [markGridMode, setMarkGridMode] = useState(false);
   const [myLoops, setMyLoops] = useState([]);
   const [activeLoopIdx, setActiveLoopIdx] = useState(0);
   const [loopBeatsCount, setLoopBeatsCount] = useState(4);
@@ -1469,6 +1480,14 @@ function App() {
   const onPointerDown = (e) => {
     if (!songBuffer) return;
     const t = timeFromEvent(e);
+    if (markGridMode) {
+      let anchor = t;
+      if (snapToGrid && beatGrid.length > 0) anchor = nearestBeat(beatGrid, t);
+      setRhythmAnchorSec(anchor);
+      setRhythmBeatGrid(buildForwardGrid(anchor, bpm, songBuffer.duration));
+      setStatus(`الجريد صار يبدأ من ${fmtTime(anchor)} فصاعدًا`);
+      return;
+    }
     setDragging(Math.abs(t - startTime) <= Math.abs(t - endTime) ? "start" : "end");
   };
   const onPointerMove = (e) => {
@@ -1834,10 +1853,35 @@ function App() {
               <button onClick={() => setZoom((z) => Math.min(80, +(z * 1.6).toFixed(2)))} style={styles.zoomBtn}>＋</button>
               <button onClick={() => setZoom(1)} style={styles.zoomReset}>إعادة الضبط</button>
             </div>
+            <div style={styles.zoomRow}>
+              <button
+                onClick={() => { const s = scrollRef.current; if (s) s.scrollLeft = Math.max(0, s.scrollLeft - s.clientWidth * 0.5); }}
+                style={styles.zoomBtn}
+              >
+                ◀ تحريك يسار
+              </button>
+              <button
+                onClick={() => { const s = scrollRef.current; if (s) s.scrollLeft = Math.min(s.scrollWidth, s.scrollLeft + s.clientWidth * 0.5); }}
+                style={styles.zoomBtn}
+              >
+                تحريك يمين ▶
+              </button>
+            </div>
             <label style={styles.checkRow}>
               <input type="checkbox" checked={autoFollow} onChange={(e) => { setAutoFollow(e.target.checked); autoFollowRef.current = e.target.checked; }} />
               📍 تتبّع المؤشر تلقائيًا أثناء التشغيل (عطّلها لو التمرير مزعج وتنقل يدويًا)
             </label>
+
+            <button
+              type="button"
+              onClick={() => setMarkGridMode((v) => !v)}
+              style={markGridMode ? styles.markGridBtnActive : styles.markGridBtn}
+            >
+              {markGridMode ? "✋ اضغط على الموجة الحين لتحديد بداية الجريد (اضغط هنا للإلغاء)" : "🎯 وضع تحديد بداية الجريد بالنقر"}
+            </button>
+            {markGridMode && (
+              <div style={styles.hint}>وأنت بوضع التحديد: اضغط على أي نقطة بالموجة تحت — هذي بتصير نقطة بداية عدّ نبضات الإيقاع (منفصلة عن تحديد النطاق)</div>
+            )}
 
             <div ref={containerRef} style={{ marginTop: 8 }}>
               <div ref={scrollRef} style={styles.scroller}>
@@ -1928,7 +1972,7 @@ function App() {
                     onClick={() => {
                       const t = playheadTimeRef.current;
                       setRhythmAnchorSec(t);
-                      if (songBuffer) setRhythmBeatGrid(buildEvenGrid(t, bpm, songBuffer.duration));
+                      if (songBuffer) setRhythmBeatGrid(buildForwardGrid(t, bpm, songBuffer.duration));
                     }}
                     title="يعلّم نقطة بداية جريد الإيقاع بس (منفصلة عن تنبو الأغنية)"
                   >
@@ -1958,7 +2002,7 @@ function App() {
                     onClick={() => {
                       if (!songBuffer) return;
                       setRhythmAnchorSec(startTime);
-                      setRhythmBeatGrid(buildEvenGrid(startTime, bpm, songBuffer.duration));
+                      setRhythmBeatGrid(buildForwardGrid(startTime, bpm, songBuffer.duration));
                       setStatus("تم ضبط نقطة تنبو الإيقاع على نقطة بداية الأغنية الحالية");
                     }}
                   >
@@ -2303,6 +2347,8 @@ const styles = {
   hint: { color: COLORS.muted, fontSize: 12, marginTop: 6, textAlign: "center" },
   analyzeBtn: { display: "block", width: "100%", marginTop: 12, background: "transparent", border: `1px solid ${COLORS.gold}`, color: COLORS.goldSoft, fontWeight: 700, padding: "10px 12px", borderRadius: 10, fontSize: 13 },
   advancedToggleBtn: { display: "block", width: "100%", marginTop: 8, background: "rgba(255,255,255,0.04)", border: `1px dashed ${COLORS.line}`, color: COLORS.muted, fontWeight: 600, padding: "8px 12px", borderRadius: 10, fontSize: 12, cursor: "pointer" },
+  markGridBtn: { display: "block", width: "100%", marginTop: 8, padding: "10px 12px", borderRadius: 10, border: `1px solid ${COLORS.coral}`, background: "transparent", color: "#F4EEE0", fontWeight: 700, fontSize: 12, cursor: "pointer" },
+  markGridBtnActive: { display: "block", width: "100%", marginTop: 8, padding: "10px 12px", borderRadius: 10, border: "none", background: COLORS.coral, color: "#fff", fontWeight: 800, fontSize: 12, cursor: "pointer" },
   reanalyzeBtn: { display: "block", width: "100%", marginTop: 8, background: "transparent", border: `1px solid ${COLORS.coral}`, color: "#8FB4E0", fontWeight: 700, padding: "10px 12px", borderRadius: 10, fontSize: 13 },
   editRow: { display: "flex", gap: 8, flexWrap: "wrap" },
   editBtn: { flex: "1 1 90px", padding: "10px 8px", borderRadius: 10, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontWeight: 700, fontSize: 12.5 },
