@@ -904,6 +904,7 @@ function App() {
   const rafRef = useRef(null);
   const autoFollowRef = useRef(true);
   const playStartRef = useRef({ ctxTime: 0, windowStart: 0 });
+  const playheadTimeRef = useRef(0);
 
   const [songBuffer, setSongBuffer] = useState(null);
   const [songName, setSongName] = useState("");
@@ -922,6 +923,7 @@ function App() {
   const [rhythmMode, setRhythmMode] = useState("builtin");
   const [patternId, setPatternId] = useState("maqsoum");
   const [patternPhase, setPatternPhase] = useState(0);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [myLoops, setMyLoops] = useState([]);
   const [activeLoopIdx, setActiveLoopIdx] = useState(0);
   const [loopBeatsCount, setLoopBeatsCount] = useState(4);
@@ -968,6 +970,7 @@ function App() {
     const tick = () => {
       const elapsed = ctx.currentTime - playStartRef.current.ctxTime;
       const t = playStartRef.current.windowStart + elapsed;
+      playheadTimeRef.current = t;
       drawPlayhead(t);
       autoScrollTo(t);
       rafRef.current = requestAnimationFrame(tick);
@@ -1815,28 +1818,55 @@ function App() {
                 ⏮ البداية من أول الأغنية (0:00)
               </button>
 
-              <div style={styles.sliderBlock}>
-                <div style={styles.sliderLabel}>
-                  <span>تصحيح التوقيت بالسمع (تزحزح الإيقاع كامل)</span>
-                  <span className="mono">{syncOffsetMs > 0 ? "+" : ""}{syncOffsetMs} ms</span>
+              {showAdvanced && (
+                <div style={styles.sliderBlock}>
+                  <div style={styles.sliderLabel}>
+                    <span>تصحيح التوقيت بالسمع (تزحزح الإيقاع كامل)</span>
+                    <span className="mono">{syncOffsetMs > 0 ? "+" : ""}{syncOffsetMs} ms</span>
+                  </div>
+                  <input type="range" min={-300} max={300} step={5} value={syncOffsetMs} onChange={(e) => setSyncOffsetMs(Number(e.target.value))} style={{ width: "100%" }} />
+                  <div style={styles.hint}>لو الإيقاع يجي "متأخر" بالسمع حرّك يمين، ولو "مبكر" حرّك يسار — يعدّل بدون إعادة تحليل</div>
                 </div>
-                <input type="range" min={-300} max={300} step={5} value={syncOffsetMs} onChange={(e) => setSyncOffsetMs(Number(e.target.value))} style={{ width: "100%" }} />
-                <div style={styles.hint}>لو الإيقاع يجي "متأخر" بالسمع حرّك يمين، ولو "مبكر" حرّك يسار — يعدّل بدون إعادة تحليل</div>
-              </div>
+              )}
 
               <button onClick={previewing ? stopPreview : handlePreview} style={styles.quickPreviewBtn}>
                 {previewing ? "⏹ إيقاف المعاينة" : "▶ معاينة سريعة الآن"}
               </button>
 
+              {showAdvanced && previewing && (
+                <div style={styles.markTapRow}>
+                  <button
+                    type="button"
+                    style={styles.markTapBtn}
+                    onClick={() => setStartTime(playheadTimeRef.current)}
+                    title="بدل ما تعتمد على الكشف التلقائي (اللي ممكن يمسك أي صوت عالي غلط)، اضغط بالضبط لما تسمع التنبو الحقيقي بالأغنية وهي شغالة"
+                  >
+                    🎯 علّم تنبو الأغنية الآن
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.markTapBtn}
+                    onClick={() => {
+                      const t = playheadTimeRef.current;
+                      setRhythmAnchorSec(t);
+                      if (songBuffer) setRhythmBeatGrid(buildEvenGrid(t, bpm, songBuffer.duration));
+                    }}
+                    title="يعلّم نقطة بداية جريد الإيقاع بس (منفصلة عن تنبو الأغنية)"
+                  >
+                    🎯 علّم تنبو الإيقاع الآن
+                  </button>
+                </div>
+              )}
+
               <div style={styles.hint}>اسحب أقرب علامة لتحديد النطاق — كبّر لترى تطابق كل ضربة مع الموجة، ومرر يمين/يسار للتنقل</div>
-              {beatGrid.length > 0 && (
+              {showAdvanced && beatGrid.length > 0 && (
                 <label style={styles.checkRow}>
                   <input type="checkbox" checked={snapToGrid} onChange={(e) => setSnapToGrid(e.target.checked)} />
                   🧲 محاذاة على جريد النبضات ({beatGrid.length} ضربة مكتشفة)
                 </label>
               )}
 
-              {rhythmBeatGrid.length > 0 && (
+              {showAdvanced && rhythmBeatGrid.length > 0 && (
                 <div style={styles.rhythmAnchorBox}>
                   <div style={styles.sliderLabel}>
                     <span>🎯 نقطة تنبو الإيقاع (منفصلة عن نقطة تنبو الأغنية)</span>
@@ -1863,10 +1893,13 @@ function App() {
               نقل نقطة البداية لموضع التنبو المكتشف تلقائيًا (عطّلها لو تبي بس السرعة والجريد بدون تحريك البداية)
             </label>
             <button onClick={handleAutoAnalyze} style={styles.analyzeBtn}>🎯 اكتشاف التنبو والجريد تلقائيًا (الأغنية كاملة)</button>
-            {beatGrid.length > 0 && (
+            <button type="button" onClick={() => setShowAdvanced((v) => !v)} style={styles.advancedToggleBtn}>
+              {showAdvanced ? "▲ إخفاء الضبط اليدوي" : "⚙️ ضبط يدوي (اختياري — استخدمه بس لو التلقائي ما ظبط)"}
+            </button>
+            {showAdvanced && beatGrid.length > 0 && (
               <button onClick={handleReanalyzeRange} style={styles.reanalyzeBtn}>🔄 إعادة تحليل المقطع المحدد فقط (أدق)</button>
             )}
-            <div style={styles.hint}>التحليل الكامل يعيد تقدير السرعة كل ٣ ثوانٍ طول الأغنية (مو رقم ثابت). لو جزء معيّن لسا مو مزبوط، حدده بالسحب واضغط "إعادة تحليل المقطع" — يركّز التحليل عليه لحاله بدقة أعلى</div>
+            <div style={styles.hint}>التحليل الكامل يعيد تقدير السرعة كل ٣ ثوانٍ طول الأغنية تلقائيًا</div>
           </>
 
         )}
@@ -2018,53 +2051,57 @@ function App() {
                   }}
                   style={{ width: 160 }}
                 />
-                <div style={styles.bpmHalveRow}>
-                  <button
-                    type="button"
-                    style={styles.bpmHalveBtn}
-                    onClick={() => {
-                      if (rhythmBeatGrid.length > 3) {
-                        const g = halveGridDensity(rhythmBeatGrid);
-                        setRhythmBeatGrid(g);
-                        setBpm(averageGridBpm(g) || Math.max(60, Math.round(bpm / 2)));
-                        setStatus("تم تصحيح جريد الإيقاع: نصّفنا عدد النبضات — جريد الأغنية ما تغيّر");
-                      } else {
-                        setBpm((b) => Math.max(60, Math.round(b / 2)));
-                      }
-                    }}
-                    title="نصّف كثافة نبضات الإيقاع فقط — جريد الأغنية يضل زي ما هو"
-                  >
-                    ÷2
-                  </button>
-                  <button
-                    type="button"
-                    style={styles.bpmHalveBtn}
-                    onClick={() => {
-                      if (rhythmBeatGrid.length > 1) {
-                        const g = doubleGridDensity(rhythmBeatGrid);
-                        setRhythmBeatGrid(g);
-                        setBpm(averageGridBpm(g) || Math.min(180, Math.round(bpm * 2)));
-                        setStatus("تم تصحيح جريد الإيقاع: ضاعفنا عدد النبضات — جريد الأغنية ما تغيّر");
-                      } else {
-                        setBpm((b) => Math.min(180, Math.round(b * 2)));
-                      }
-                    }}
-                    title="ضاعف كثافة نبضات الإيقاع فقط — جريد الأغنية يضل زي ما هو"
-                  >
-                    ×2
-                  </button>
-                </div>
-                <div style={styles.knownBpmRow}>
-                  <input
-                    type="number" className="mono" style={{ ...styles.numInput, width: 70 }}
-                    value={bpm}
-                    onChange={(e) => setBpm(Math.max(40, Math.min(220, Number(e.target.value) || 0)))}
-                  />
-                  <button type="button" onClick={handleAnalyzeWithKnownBpm} style={styles.knownBpmBtn}>
-                    🎯 ابحث عن جريد الأغنية بهذا الـBPM
-                  </button>
-                </div>
-                <div style={styles.hint}>لو الكشف التلقائي غلط، اكتب السرعة الصحيحة اللي تعرفها (أو دقّها بزر "دق") واضغط الزر — يبني الجريد على أساسها مباشرة بدون تخمين</div>
+                {showAdvanced && (
+                  <>
+                    <div style={styles.bpmHalveRow}>
+                      <button
+                        type="button"
+                        style={styles.bpmHalveBtn}
+                        onClick={() => {
+                          if (rhythmBeatGrid.length > 3) {
+                            const g = halveGridDensity(rhythmBeatGrid);
+                            setRhythmBeatGrid(g);
+                            setBpm(averageGridBpm(g) || Math.max(60, Math.round(bpm / 2)));
+                            setStatus("تم تصحيح جريد الإيقاع: نصّفنا عدد النبضات — جريد الأغنية ما تغيّر");
+                          } else {
+                            setBpm((b) => Math.max(60, Math.round(b / 2)));
+                          }
+                        }}
+                        title="نصّف كثافة نبضات الإيقاع فقط — جريد الأغنية يضل زي ما هو"
+                      >
+                        ÷2
+                      </button>
+                      <button
+                        type="button"
+                        style={styles.bpmHalveBtn}
+                        onClick={() => {
+                          if (rhythmBeatGrid.length > 1) {
+                            const g = doubleGridDensity(rhythmBeatGrid);
+                            setRhythmBeatGrid(g);
+                            setBpm(averageGridBpm(g) || Math.min(180, Math.round(bpm * 2)));
+                            setStatus("تم تصحيح جريد الإيقاع: ضاعفنا عدد النبضات — جريد الأغنية ما تغيّر");
+                          } else {
+                            setBpm((b) => Math.min(180, Math.round(b * 2)));
+                          }
+                        }}
+                        title="ضاعف كثافة نبضات الإيقاع فقط — جريد الأغنية يضل زي ما هو"
+                      >
+                        ×2
+                      </button>
+                    </div>
+                    <div style={styles.knownBpmRow}>
+                      <input
+                        type="number" className="mono" style={{ ...styles.numInput, width: 70 }}
+                        value={bpm}
+                        onChange={(e) => setBpm(Math.max(40, Math.min(220, Number(e.target.value) || 0)))}
+                      />
+                      <button type="button" onClick={handleAnalyzeWithKnownBpm} style={styles.knownBpmBtn}>
+                        🎯 ابحث عن جريد الأغنية بهذا الـBPM
+                      </button>
+                    </div>
+                    <div style={styles.hint}>لو الكشف التلقائي غلط، اكتب السرعة الصحيحة اللي تعرفها (أو دقّها بزر "دق") واضغط الزر — يبني الجريد على أساسها مباشرة بدون تخمين</div>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -2182,8 +2219,11 @@ const styles = {
   numInput: { width: "100%", padding: "9px 10px", borderRadius: 8, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontSize: 14 },
   startFromZeroBtn: { display: "block", width: "100%", marginTop: 10, padding: "9px 12px", borderRadius: 8, border: `1px solid ${COLORS.line}`, background: "transparent", color: COLORS.text, fontWeight: 700, fontSize: 12.5 },
   quickPreviewBtn: { display: "block", width: "100%", marginTop: 12, padding: "12px", borderRadius: 10, border: "none", background: COLORS.gold, color: "#1B1030", fontWeight: 800, fontSize: 14 },
+  markTapRow: { display: "flex", gap: 8, marginTop: 8 },
+  markTapBtn: { flex: 1, padding: "10px 8px", borderRadius: 10, border: `1px solid ${COLORS.coral}`, background: "rgba(226,96,79,0.12)", color: "#F4EEE0", fontWeight: 700, fontSize: 12, cursor: "pointer" },
   hint: { color: COLORS.muted, fontSize: 12, marginTop: 6, textAlign: "center" },
   analyzeBtn: { display: "block", width: "100%", marginTop: 12, background: "transparent", border: `1px solid ${COLORS.gold}`, color: COLORS.goldSoft, fontWeight: 700, padding: "10px 12px", borderRadius: 10, fontSize: 13 },
+  advancedToggleBtn: { display: "block", width: "100%", marginTop: 8, background: "rgba(255,255,255,0.04)", border: `1px dashed ${COLORS.line}`, color: COLORS.muted, fontWeight: 600, padding: "8px 12px", borderRadius: 10, fontSize: 12, cursor: "pointer" },
   reanalyzeBtn: { display: "block", width: "100%", marginTop: 8, background: "transparent", border: `1px solid ${COLORS.coral}`, color: "#8FB4E0", fontWeight: 700, padding: "10px 12px", borderRadius: 10, fontSize: 13 },
   editRow: { display: "flex", gap: 8, flexWrap: "wrap" },
   editBtn: { flex: "1 1 90px", padding: "10px 8px", borderRadius: 10, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontWeight: 700, fontSize: 12.5 },
