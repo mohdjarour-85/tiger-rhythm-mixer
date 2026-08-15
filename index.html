@@ -218,9 +218,10 @@ async function buildPhraseBuffer(pattern, bpm, sampleRate) {
   return concatBuffers([normalBar, normalBar, normalBar, fillBar]);
 }
 /* يبني الإيقاع بالمحاذاة الحقيقية: كل دم/تك يُحسب ويُحط بالضبط على وقت النبضة الفعلية بالجريد، بدل سرعة ثابتة مفترضة */
-async function buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, sampleRate, offsetSec) {
+async function buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, sampleRate, offsetSec, phase) {
   if (!beatGrid || beatGrid.length < 3) return null;
   offsetSec = offsetSec || 0;
+  phase = phase || 0;
   const stepsPerBeat = pattern.stepsPerBeat || 2;
   const beatsPerBar = pattern.slots.length / stepsPerBeat;
   const duration = Math.max(0.05, endTime - startTime);
@@ -231,8 +232,8 @@ async function buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, samp
     const b0 = beatGrid[i], b1 = beatGrid[i + 1];
     if (b1 <= startTime) continue;
     if (b0 >= endTime) break;
-    const beatInBar = i % beatsPerBar;
-    const barIdx = Math.floor(i / beatsPerBar);
+    const beatInBar = ((i + phase) % beatsPerBar + beatsPerBar) % beatsPerBar;
+    const barIdx = Math.floor((i + phase) / beatsPerBar);
     const useFill = !!pattern.fill && barIdx % 4 === 3;
     const slots = useFill ? pattern.fill : pattern.slots;
     const beatDur = b1 - b0;
@@ -264,18 +265,19 @@ const HIT_COLORS = {
 };
 const HIT_LABELS = { dum: "دم", tak: "تك", clap: "كلاب", hat: "هاي هات", hatO: "هاي هات مفتوح", crash: "كراش" };
 /* يحسب قائمة أوقات الضربات (بدون توليف صوت) لعرضها مرئيًا — نفس منطق البناء الصوتي بالضبط */
-function computeHitList(pattern, beatGrid, startTime, endTime, bpm, offsetSec) {
+function computeHitList(pattern, beatGrid, startTime, endTime, bpm, offsetSec, phase) {
   offsetSec = offsetSec || 0;
   const hits = [];
   const stepsPerBeat = pattern.stepsPerBeat || 2;
   if (beatGrid && beatGrid.length > 2) {
+    phase = phase || 0;
     const beatsPerBar = pattern.slots.length / stepsPerBeat;
     for (let i = 0; i < beatGrid.length - 1; i++) {
       const b0 = beatGrid[i], b1 = beatGrid[i + 1];
       if (b1 <= startTime) continue;
       if (b0 >= endTime) break;
-      const beatInBar = i % beatsPerBar;
-      const barIdx = Math.floor(i / beatsPerBar);
+      const beatInBar = ((i + phase) % beatsPerBar + beatsPerBar) % beatsPerBar;
+      const barIdx = Math.floor((i + phase) / beatsPerBar);
       const useFill = !!pattern.fill && barIdx % 4 === 3;
       const slots = useFill ? pattern.fill : pattern.slots;
       const beatDur = b1 - b0;
@@ -857,6 +859,7 @@ function App() {
   const [category, setCategory] = useState("مصري");
   const [rhythmMode, setRhythmMode] = useState("builtin");
   const [patternId, setPatternId] = useState("maqsoum");
+  const [patternPhase, setPatternPhase] = useState(0);
   const [myLoops, setMyLoops] = useState([]);
   const [activeLoopIdx, setActiveLoopIdx] = useState(0);
   const [loopBeatsCount, setLoopBeatsCount] = useState(4);
@@ -885,6 +888,10 @@ function App() {
   const [previewing, setPreviewing] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState(null);
   const [downloadName, setDownloadName] = useState("");
+
+  useEffect(() => {
+    setPatternPhase(0);
+  }, [patternId]);
 
   const getCtx = useCallback(() => {
     if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
@@ -1212,7 +1219,7 @@ function App() {
     const offsetSec = syncOffsetMs / 1000;
     if (rhythmMode === "builtin") {
       const pattern = PATTERNS.find((p) => p.id === patternId);
-      const hits = computeHitList(pattern, beatGrid, startTime, endTime, bpm, offsetSec);
+      const hits = computeHitList(pattern, beatGrid, startTime, endTime, bpm, offsetSec, patternPhase);
       for (const h of hits) {
         const x = (h.time / duration) * width;
         g.fillStyle = HIT_COLORS[h.type] || "#fff";
@@ -1280,7 +1287,7 @@ function App() {
         g.stroke();
       }
     }
-  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm, myLoops, activeLoopIdx, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch]);
+  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm, myLoops, activeLoopIdx, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch, patternPhase]);
 
   const timeFromEvent = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -1377,12 +1384,12 @@ function App() {
     }
     const pattern = PATTERNS.find((p) => p.id === patternId);
     if (beatGrid.length > 2) {
-      const locked = await buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, songBuffer.sampleRate, offsetSec);
+      const locked = await buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, songBuffer.sampleRate, offsetSec, patternPhase);
       if (locked) return { buffer: locked, rStart: startTime, rEnd: endTime };
     }
     const phrase = await buildPhraseBuffer(pattern, bpm, songBuffer.sampleRate);
     return { buffer: phrase, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
-  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch]);
+  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch, patternPhase]);
 
   const stopPreview = () => {
     previewNodesRef.current.forEach((n) => {
@@ -1439,7 +1446,7 @@ function App() {
         if (rhythmMode === "builtin" && beatGrid.length > 2) {
           const pattern = PATTERNS.find((p) => p.id === patternId);
           const extGrid = extendGridBackward(beatGrid, bpm, introSec);
-          const introRhythm = await buildGridLockedRhythm(pattern, extGrid, -introSec, endTime, songBuffer.sampleRate, syncOffsetMs / 1000);
+          const introRhythm = await buildGridLockedRhythm(pattern, extGrid, -introSec, endTime, songBuffer.sampleRate, syncOffsetMs / 1000, patternPhase);
           if (introRhythm) { rBuffer = introRhythm; rStart = 0; rEnd = introSec + endTime; }
         } else {
           rStart = rhy.rStart + introSec;
@@ -1541,7 +1548,7 @@ function App() {
         } else {
           const pattern = PATTERNS.find((p) => p.id === patternId);
           if (grid.length > 2) {
-            rhythmBuffer = await buildGridLockedRhythm(pattern, grid, sStart, sEnd, f.buffer.sampleRate, offsetSec);
+            rhythmBuffer = await buildGridLockedRhythm(pattern, grid, sStart, sEnd, f.buffer.sampleRate, offsetSec, patternPhase);
           } else {
             rhythmBuffer = await buildPhraseBuffer(pattern, dBpm, f.buffer.sampleRate);
             rStart = sStart + offsetSec;
@@ -1791,6 +1798,23 @@ function App() {
             </div>
             <div style={styles.hint}>كل نمط فيه تقسيمة تلقائية كل 4 مازورات — مو تكرار ثابت</div>
             <div style={styles.hint}>{beatGrid.length > 2 ? "✅ الإيقاع محاذى على نبضات الأغنية الحقيقية (اكتشاف تلقائي مفعّل)" : "⚠️ اضغط \"اكتشاف التنبو والجريد تلقائيًا\" فوق حتى يمشي كل دم/تك بالضبط مع نبضات الأغنية الحقيقية"}</div>
+
+            {beatGrid.length > 2 && (() => {
+              const pattern = PATTERNS.find((p) => p.id === patternId);
+              const beatsPerBar = pattern.slots.length / (pattern.stepsPerBeat || 2);
+              return (
+                <div style={{ marginTop: 14 }}>
+                  <div style={styles.hint}>
+                    ⚙️ إزاحة الطور — لو "الدم" ما توقّع مع "الدوم" اللي تسمعه بالأغنية، زحزح هالرقم وجرّب المعاينة السريعة
+                  </div>
+                  <div style={styles.zoomRow}>
+                    <button onClick={() => setPatternPhase((p) => (p - 1 + beatsPerBar) % beatsPerBar)} style={styles.zoomBtn}>◀</button>
+                    <span className="mono" style={styles.zoomLabel}>طور {patternPhase} / {beatsPerBar - 1}</span>
+                    <button onClick={() => setPatternPhase((p) => (p + 1) % beatsPerBar)} style={styles.zoomBtn}>▶</button>
+                  </div>
+                </div>
+              );
+            })()}
           </>
         ) : (
           <div style={{ marginTop: 14 }}>
