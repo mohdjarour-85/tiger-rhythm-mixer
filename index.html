@@ -625,6 +625,17 @@ function limitClipping(buffer) {
   }
   return buffer;
 }
+/* إعادة أخذ عينات فعلية لمعدل تسليم مختلف (مثل 48kHz) — خطوة منفصلة بعد اكتمال الدمج، تستخدم محرك إعادة العينات المدمج بالمتصفح */
+async function resampleTo(buffer, targetRate) {
+  if (!targetRate || buffer.sampleRate === targetRate) return buffer;
+  const newLength = Math.ceil(buffer.duration * targetRate);
+  const ctx = new OfflineAudioContext(buffer.numberOfChannels, newLength, targetRate);
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(ctx.destination);
+  src.start(0);
+  return await ctx.startRendering();
+}
 /* ---------- دمج مباشر بالعينات: أوثق من جدولة تشغيل (loop/duration) عبر AudioContext ---------- */
 function buildMix(songBuffer, rhythmBuffer, rhythmStart, rhythmEnd, songVol, rhythmVol, windowStart, windowEnd) {
   const sr = songBuffer.sampleRate;
@@ -737,6 +748,7 @@ function App() {
   const previewNodesRef = useRef([]);
   const tapTimesRef = useRef([]);
   const rafRef = useRef(null);
+  const autoFollowRef = useRef(true);
   const playStartRef = useRef({ ctxTime: 0, windowStart: 0 });
 
   const [songBuffer, setSongBuffer] = useState(null);
@@ -746,6 +758,7 @@ function App() {
   const [historyLen, setHistoryLen] = useState(0);
   const [hasClipboard, setHasClipboard] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [autoFollow, setAutoFollow] = useState(true);
   const [songFiles, setSongFiles] = useState([]);
   const [activeSongIdx, setActiveSongIdx] = useState(-1);
   const [batchBusy, setBatchBusy] = useState(false);
@@ -771,6 +784,7 @@ function App() {
   const [rhythmVol, setRhythmVol] = useState(0.85);
 
   const [outputQuality, setOutputQuality] = useState("high");
+  const [outputSR, setOutputSR] = useState(48000);
   const [masterBoost, setMasterBoost] = useState(true);
 
   const [status, setStatus] = useState("");
@@ -822,13 +836,14 @@ function App() {
   };
   const autoScrollTo = (t) => {
     const scroller = scrollRef.current;
-    if (!scroller || !songBuffer) return;
+    if (!scroller || !songBuffer || !autoFollowRef.current) return;
     const width = scroller.scrollWidth;
+    if (!width) return;
     const x = (t / songBuffer.duration) * width;
     const viewW = scroller.clientWidth;
-    if (x < scroller.scrollLeft + 40 || x > scroller.scrollLeft + viewW - 40) {
-      scroller.scrollLeft = Math.max(0, x - viewW / 2);
-    }
+    if (viewW >= width) return;
+    const target = Math.max(0, Math.min(width - viewW, x - viewW / 2));
+    scroller.scrollLeft = target;
   };
 
   const pushHistory = (buf) => {
@@ -1268,6 +1283,12 @@ function App() {
         mixed = normalizePeak(mixed, -1);
       }
 
+      if (outputSR && mixed.sampleRate !== outputSR) {
+        setStatus(`جارِ التحويل لمعدل ${outputSR / 1000}kHz...`);
+        mixed = await resampleTo(mixed, outputSR);
+        limitClipping(mixed);
+      }
+
       setStatus("جارِ تجهيز ملف WAV للتحميل...");
       const bitDepth = outputQuality === "high" ? 24 : 16;
       const blob = audioBufferToWav(mixed, bitDepth);
@@ -1358,6 +1379,10 @@ function App() {
           mixed = await offline.startRendering();
           mixed = normalizePeak(mixed, -1);
         }
+        if (outputSR && mixed.sampleRate !== outputSR) {
+          mixed = await resampleTo(mixed, outputSR);
+          limitClipping(mixed);
+        }
         const bitDepth = outputQuality === "high" ? 24 : 16;
         const blob = audioBufferToWav(mixed, bitDepth);
         const url = URL.createObjectURL(blob);
@@ -1438,6 +1463,10 @@ function App() {
               <button onClick={() => setZoom((z) => Math.min(80, +(z * 1.6).toFixed(2)))} style={styles.zoomBtn}>＋</button>
               <button onClick={() => setZoom(1)} style={styles.zoomReset}>إعادة الضبط</button>
             </div>
+            <label style={styles.checkRow}>
+              <input type="checkbox" checked={autoFollow} onChange={(e) => { setAutoFollow(e.target.checked); autoFollowRef.current = e.target.checked; }} />
+              📍 تتبّع المؤشر تلقائيًا أثناء التشغيل (عطّلها لو التمرير مزعج وتنقل يدويًا)
+            </label>
 
             <div ref={containerRef} style={{ marginTop: 8 }}>
               <div ref={scrollRef} style={styles.scroller}>
@@ -1633,10 +1662,20 @@ function App() {
 
       <section style={{ ...styles.card, ...(canWork ? {} : styles.disabled) }}>
         <div style={styles.stepRow}><span style={styles.stepNum}>05</span><span style={styles.stepTitle}>جودة الإخراج</span></div>
+
+        <div style={styles.hint}>معدل العينة (Sample Rate)</div>
         <div style={styles.toggleRow}>
-          <button onClick={() => setOutputQuality("standard")} style={outputQuality === "standard" ? styles.toggleActive : styles.toggle}>قياسية 16-bit</button>
-          <button onClick={() => setOutputQuality("high")} style={outputQuality === "high" ? styles.toggleActive : styles.toggle}>عالية 24-bit</button>
+          <button onClick={() => setOutputSR(0)} style={outputSR === 0 ? styles.toggleActive : styles.toggle}>أصلي (بدون تحويل)</button>
+          <button onClick={() => setOutputSR(44100)} style={outputSR === 44100 ? styles.toggleActive : styles.toggle}>44.1kHz</button>
+          <button onClick={() => setOutputSR(48000)} style={outputSR === 48000 ? styles.toggleActive : styles.toggle}>48kHz</button>
         </div>
+
+        <div style={{ ...styles.hint, marginTop: 14 }}>عمق البت (Bit Depth)</div>
+        <div style={styles.toggleRow}>
+          <button onClick={() => setOutputQuality("standard")} style={outputQuality === "standard" ? styles.toggleActive : styles.toggle}>16-bit</button>
+          <button onClick={() => setOutputQuality("high")} style={outputQuality === "high" ? styles.toggleActive : styles.toggle}>24-bit</button>
+        </div>
+
         <label style={styles.checkRow}>
           <input type="checkbox" checked={masterBoost} onChange={(e) => setMasterBoost(e.target.checked)} />
           تلميع وتقوية الصوت النهائي (كومبريسور + تطبيع المستوى)
