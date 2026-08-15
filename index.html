@@ -623,6 +623,24 @@ function getSyncedLoopBuffer(loopBuffer, beatGrid, startTime, endTime, bpm, beat
   return preservePitch ? pitchPreservingStretch(loopBuffer, ratio) : stretchBuffer(loopBuffer, ratio);
 }
 
+/* يمدّد جريد النبضات للخلف (لأوقات سالبة قبل بداية الأغنية) بالاستقراء من فاصل أول نبضتين حقيقيتين — يستخدم لمقدمة الإيقاع */
+function extendGridBackward(beatGrid, bpm, introSec) {
+  const interval = (beatGrid && beatGrid.length > 1) ? (beatGrid[1] - beatGrid[0]) || 60 / bpm : 60 / bpm;
+  const base = (beatGrid && beatGrid.length > 0) ? beatGrid[0] : 0;
+  const extra = [];
+  let t = base;
+  let guard = 0;
+  while (t > -introSec - interval && guard++ < 2000) {
+    t -= interval;
+    extra.unshift(t);
+  }
+  return beatGrid && beatGrid.length ? extra.concat(beatGrid) : extra;
+}
+function silenceBuffer(sampleRate, numberOfChannels, seconds) {
+  const len = Math.max(1, Math.round(seconds * sampleRate));
+  return new AudioBuffer({ length: len, numberOfChannels, sampleRate });
+}
+
 function sliceBuffer(buffer, startSec, endSec) {
   const sr = buffer.sampleRate;
   const s = Math.max(0, Math.floor(startSec * sr));
@@ -778,6 +796,13 @@ function audioBufferToWav(buffer, bitDepth) {
 }
 
 /* ---------- أدوات مساعدة ---------- */
+/* يحدّ من دقة رسم الكانفاس حتى ما يتجاوز الحد الأقصى المسموح بالمتصفح عند تكبير عالي (كان يسبب رسم أبيض/فاشل) */
+function safeCanvasScale(cssWidth) {
+  const dpr = window.devicePixelRatio || 1;
+  const maxPx = 8000;
+  if (cssWidth * dpr > maxPx) return Math.max(1, maxPx / cssWidth);
+  return dpr;
+}
 function fmtTime(s) {
   if (!isFinite(s)) return "٠:٠٠";
   const m = Math.floor(s / 60);
@@ -845,6 +870,7 @@ function App() {
   const [beatGrid, setBeatGrid] = useState([]);
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [syncOffsetMs, setSyncOffsetMs] = useState(0);
+  const [introSec, setIntroSec] = useState(0);
 
   const [songVol, setSongVol] = useState(1);
   const [rhythmVol, setRhythmVol] = useState(0.85);
@@ -884,7 +910,8 @@ function App() {
   const drawPlayhead = (t) => {
     const canvas = overlayCanvasRef.current;
     if (!canvas || !songBuffer) return;
-    const dpr = window.devicePixelRatio || 1;
+    const cssWidth = canvas.clientWidth || canvas.width;
+    const dpr = safeCanvasScale(cssWidth);
     const g = canvas.getContext("2d");
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.clearRect(0, 0, canvas.width, canvas.height);
@@ -1050,7 +1077,7 @@ function App() {
     const baseWidth = container.clientWidth;
     const width = Math.max(baseWidth, baseWidth * zoom);
     const height = 220;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = safeCanvasScale(width);
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     canvas.style.width = width + "px";
@@ -1148,7 +1175,7 @@ function App() {
     const baseWidth = container.clientWidth;
     const width = Math.max(baseWidth, baseWidth * zoom);
     const height = 64;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = safeCanvasScale(width);
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     canvas.style.width = width + "px";
@@ -1362,9 +1389,26 @@ function App() {
     try {
       const rhy = await buildRhythmBuffer();
       if (!rhy) { setBusy(false); return; }
-      setStatus("جارِ دمج الإيقاع مع الأغنية الكاملة...");
 
-      let mixed = buildMix(songBuffer, rhy.buffer, rhy.rStart, rhy.rEnd, songVol, rhythmVol, 0, songBuffer.duration);
+      let workingSong = songBuffer;
+      let rBuffer = rhy.buffer, rStart = rhy.rStart, rEnd = rhy.rEnd;
+
+      if (introSec > 0) {
+        setStatus(`جارِ بناء مقدمة إيقاع ${introSec} ثانية...`);
+        workingSong = concatBuffers([silenceBuffer(songBuffer.sampleRate, songBuffer.numberOfChannels, introSec), songBuffer]);
+        if (rhythmMode === "builtin" && beatGrid.length > 2) {
+          const pattern = PATTERNS.find((p) => p.id === patternId);
+          const extGrid = extendGridBackward(beatGrid, bpm, introSec);
+          const introRhythm = await buildGridLockedRhythm(pattern, extGrid, -introSec, endTime, songBuffer.sampleRate, syncOffsetMs / 1000);
+          if (introRhythm) { rBuffer = introRhythm; rStart = 0; rEnd = introSec + endTime; }
+        } else {
+          rStart = rhy.rStart + introSec;
+          rEnd = rhy.rEnd + introSec;
+        }
+      }
+
+      setStatus("جارِ دمج الإيقاع مع الأغنية الكاملة...");
+      let mixed = buildMix(workingSong, rBuffer, rStart, rEnd, songVol, rhythmVol, 0, workingSong.duration);
       limitClipping(mixed);
 
       if (masterBoost) {
@@ -1777,6 +1821,15 @@ function App() {
         <div style={styles.sliderBlock}>
           <div style={styles.sliderLabel}><span>صوت الإيقاع المُضاف</span><span className="mono">{Math.round(rhythmVol * 100)}٪</span></div>
           <input type="range" min={0} max={2} step={0.01} value={rhythmVol} onChange={(e) => setRhythmVol(Number(e.target.value))} style={{ width: "100%" }} />
+        </div>
+        <div style={styles.numField}>
+          <label style={styles.numLabel}>مقدمة إيقاع قبل الأغنية (ثانية) — إيقاع بس بدون الأغنية، يمشي مع نفس السرعة والجريد</label>
+          <input
+            type="number" min={0} max={60} step={1} className="mono"
+            value={introSec}
+            onChange={(e) => setIntroSec(Math.max(0, Number(e.target.value) || 0))}
+            style={styles.numInput}
+          />
         </div>
       </section>
 
