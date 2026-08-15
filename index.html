@@ -525,6 +525,39 @@ async function analyzeRhythm(buffer) {
 }
 
 /* ---------- تحرير دقيق: قص / نسخ / لصق / حذف ---------- */
+/* تمديد/تقصير زمني بإعادة أخذ العينات — يطابق التوقيت بدقة، مع تغيّر بسيط بطبقة الصوت عند نسب التمدد الكبيرة */
+function stretchBuffer(buffer, ratio) {
+  const newLength = Math.max(1, Math.round(buffer.length * ratio));
+  const out = new AudioBuffer({ length: newLength, numberOfChannels: buffer.numberOfChannels, sampleRate: buffer.sampleRate });
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const src = buffer.getChannelData(ch);
+    const dst = out.getChannelData(ch);
+    for (let i = 0; i < newLength; i++) {
+      const srcPos = i / ratio;
+      const i0 = Math.floor(srcPos);
+      const i1 = Math.min(src.length - 1, i0 + 1);
+      const frac = srcPos - i0;
+      dst[i] = (src[i0] || 0) * (1 - frac) + (src[i1] || 0) * frac;
+    }
+  }
+  return out;
+}
+function averageBeatInterval(beatGrid, startTime, endTime) {
+  const intervals = [];
+  for (let i = 0; i < beatGrid.length - 1; i++) {
+    if (beatGrid[i] >= startTime && beatGrid[i] < endTime) intervals.push(beatGrid[i + 1] - beatGrid[i]);
+  }
+  if (!intervals.length) return null;
+  return intervals.reduce((a, b) => a + b, 0) / intervals.length;
+}
+function getSyncedLoopBuffer(loopBuffer, beatGrid, startTime, endTime, bpm, beatsPerLoop) {
+  const avg = averageBeatInterval(beatGrid, startTime, endTime) || 60 / bpm;
+  const targetDur = beatsPerLoop * avg;
+  const ratio = targetDur / loopBuffer.duration;
+  if (!isFinite(ratio) || ratio < 0.25 || ratio > 4) return loopBuffer;
+  return stretchBuffer(loopBuffer, ratio);
+}
+
 function sliceBuffer(buffer, startSec, endSec) {
   const sr = buffer.sampleRate;
   const s = Math.max(0, Math.floor(startSec * sr));
@@ -723,6 +756,8 @@ function App() {
   const [patternId, setPatternId] = useState("maqsoum");
   const [myLoops, setMyLoops] = useState([]);
   const [activeLoopIdx, setActiveLoopIdx] = useState(0);
+  const [loopBeatsCount, setLoopBeatsCount] = useState(4);
+  const [loopSyncEnabled, setLoopSyncEnabled] = useState(true);
 
   const [bpm, setBpm] = useState(120);
   const [startTime, setStartTime] = useState(0);
@@ -1025,11 +1060,12 @@ function App() {
     } else {
       const loop = myLoops[activeLoopIdx];
       if (loop && loop.buffer) {
+        const activeBuf = loopSyncEnabled ? getSyncedLoopBuffer(loop.buffer, beatGrid, startTime, endTime, bpm, loopBeatsCount) : loop.buffer;
         const rStart = startTime + offsetSec;
         const rEnd = endTime + offsetSec;
-        const rLen = loop.buffer.length;
-        const sr = loop.buffer.sampleRate;
-        const loopPeaks = computePeaks(loop.buffer, Math.max(60, Math.round(200 * (loop.buffer.duration || 1))));
+        const rLen = activeBuf.length;
+        const sr = activeBuf.sampleRate;
+        const loopPeaks = computePeaks(activeBuf, Math.max(60, Math.round(200 * (activeBuf.duration || 1))));
         const startX = (rStart / duration) * width;
         const endX = (rEnd / duration) * width;
         g.fillStyle = "rgba(226,96,79,0.08)";
@@ -1046,7 +1082,7 @@ function App() {
         }
         g.strokeStyle = "rgba(255,255,255,0.5)";
         g.lineWidth = 1;
-        const loopDur = loop.buffer.duration;
+        const loopDur = activeBuf.duration;
         for (let t = rStart; t < rEnd; t += loopDur) {
           const x = (t / duration) * width;
           g.beginPath();
@@ -1061,7 +1097,7 @@ function App() {
         g.fillText("ارفع لوب من قسم \"لوباتي الخاصة\" حتى يظهر هنا", width / 2, height / 2 + 4);
       }
     }
-  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm, myLoops, activeLoopIdx, syncOffsetMs]);
+  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm, myLoops, activeLoopIdx, syncOffsetMs, loopSyncEnabled, loopBeatsCount]);
 
   const timeFromEvent = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -1151,7 +1187,10 @@ function App() {
         setStatus("ارفع لوب إيقاعي أو اختر نمطًا جاهزًا.");
         return null;
       }
-      return { buffer: loop.buffer, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
+      const buf = loopSyncEnabled
+        ? getSyncedLoopBuffer(loop.buffer, beatGrid, startTime, endTime, bpm, loopBeatsCount)
+        : loop.buffer;
+      return { buffer: buf, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
     }
     const pattern = PATTERNS.find((p) => p.id === patternId);
     if (beatGrid.length > 2) {
@@ -1160,7 +1199,7 @@ function App() {
     }
     const phrase = await buildPhraseBuffer(pattern, bpm, songBuffer.sampleRate);
     return { buffer: phrase, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
-  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime, syncOffsetMs]);
+  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime, syncOffsetMs, loopSyncEnabled, loopBeatsCount]);
 
   const stopPreview = () => {
     previewNodesRef.current.forEach((n) => {
@@ -1289,7 +1328,8 @@ function App() {
         let rStart = sStart, rEnd = sEnd;
         const offsetSec = syncOffsetMs / 1000;
         if (rhythmMode === "custom") {
-          rhythmBuffer = myLoops[activeLoopIdx]?.buffer || null;
+          const loop = myLoops[activeLoopIdx];
+          rhythmBuffer = loop ? (loopSyncEnabled ? getSyncedLoopBuffer(loop.buffer, grid, sStart, sEnd, dBpm, loopBeatsCount) : loop.buffer) : null;
           rStart = sStart + offsetSec;
           rEnd = sEnd + offsetSec;
         } else {
@@ -1533,6 +1573,32 @@ function App() {
               </div>
             )}
             {myLoops.length === 0 && <div style={styles.hint}>مكتبتك فاضية — ارفع أول لوب إيقاعي</div>}
+
+            {myLoops[activeLoopIdx] && (
+              <div style={{ marginTop: 16 }}>
+                <label style={styles.checkRow}>
+                  <input type="checkbox" checked={loopSyncEnabled} onChange={(e) => setLoopSyncEnabled(e.target.checked)} />
+                  🎚 مزامنة اللوب مع سرعة الأغنية (تمديد/تقصير زمني)
+                </label>
+                {loopSyncEnabled && (
+                  <>
+                    <div style={styles.numField}>
+                      <label style={styles.numLabel}>كم نبضة (بيت) يغطي هذا اللوب؟</label>
+                      <input
+                        type="number" min={1} max={16} step={1} className="mono"
+                        value={loopBeatsCount}
+                        onChange={(e) => setLoopBeatsCount(Math.max(1, Number(e.target.value) || 1))}
+                        style={styles.numInput}
+                      />
+                    </div>
+                    <div style={styles.hint}>
+                      طول اللوب الأصلي: {myLoops[activeLoopIdx].buffer.duration.toFixed(2)} ثانية — سيتمدد/يتقصّر تلقائيًا ليطابق سرعة الأغنية المكتشفة
+                    </div>
+                    <div style={styles.hint}>⚠️ التمديد يغيّر طبقة الصوت شوي عند فروقات السرعة الكبيرة (مثل تسريع/تبطيء شريط)</div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
       </section>
