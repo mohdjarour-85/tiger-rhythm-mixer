@@ -1645,8 +1645,10 @@ function App() {
           const introRhythm = await buildGridLockedRhythm(pattern, extGrid, -introSec, endTime, songBuffer.sampleRate, syncOffsetMs / 1000, patternPhase);
           if (introRhythm) { rBuffer = introRhythm; rStart = 0; rEnd = introSec + endTime; }
         } else {
-          rStart = rhy.rStart + introSec;
-          rEnd = rhy.rEnd + introSec;
+          /* بدون جريد حقيقي (نمط ثابت أو لوب مخصص): buildMix يكرّر الإيقاع تلقائيًا طول أي نطاق تعطيه له،
+             فعشان يغطي فترة المقدمة كمان لازم نخلي بداية التغطية من الصفر (تقريبًا) بدل ما نأخر بدايتها بمقدار المقدمة */
+          rStart = syncOffsetMs / 1000;
+          rEnd = introSec + rhy.rEnd;
         }
       }
 
