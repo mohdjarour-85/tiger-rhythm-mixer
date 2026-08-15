@@ -433,6 +433,19 @@ function averageGridBpm(grid) {
   const avg = total / (grid.length - 1);
   return avg > 0 ? Math.round(60 / avg) : null;
 }
+function buildEvenGrid(anchorSec, bpm, durationSec) {
+  const interval = 60 / bpm;
+  if (!(interval > 0) || !(durationSec > 0)) return [];
+  const grid = [];
+  const back = [];
+  let t = anchorSec;
+  while (t > 0) { back.push(t); t -= interval; }
+  back.reverse();
+  grid.push(...back);
+  t = anchorSec + interval;
+  while (t < durationSec) { grid.push(t); t += interval; }
+  return grid;
+}
 function nearestBeat(grid, t) {
   if (!grid || grid.length === 0) return t;
   let best = grid[0], bestDist = Math.abs(grid[0] - t);
@@ -893,6 +906,8 @@ function App() {
   const [endTime, setEndTime] = useState(0);
   const [dragging, setDragging] = useState(null);
   const [beatGrid, setBeatGrid] = useState([]);
+  const [rhythmBeatGrid, setRhythmBeatGrid] = useState([]);
+  const [rhythmAnchorSec, setRhythmAnchorSec] = useState(0);
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [moveStartToDrop, setMoveStartToDrop] = useState(false);
   const [syncOffsetMs, setSyncOffsetMs] = useState(0);
@@ -1047,6 +1062,8 @@ function App() {
       const { bpm: detectedBpm, beatGrid: grid } = await analyzeRhythm(songBuffer);
       setBpm(detectedBpm);
       setBeatGrid(grid);
+      setRhythmBeatGrid(grid);
+      setRhythmAnchorSec(grid.length ? grid[0] : 0);
       setSnapToGrid(true);
       if (moveStartToDrop) {
         const dropAt = detectDrop(songBuffer);
@@ -1241,7 +1258,7 @@ function App() {
     const offsetSec = syncOffsetMs / 1000;
     if (rhythmMode === "builtin") {
       const pattern = PATTERNS.find((p) => p.id === patternId);
-      const hits = computeHitList(pattern, beatGrid, startTime, endTime, bpm, offsetSec, patternPhase);
+      const hits = computeHitList(pattern, rhythmBeatGrid, startTime, endTime, bpm, offsetSec, patternPhase);
       for (const h of hits) {
         const x = (h.time / duration) * width;
         g.fillStyle = HIT_COLORS[h.type] || "#fff";
@@ -1253,7 +1270,7 @@ function App() {
     } else {
       const loop = myLoops[activeLoopIdx];
       if (loop && loop.buffer) {
-        const activeBuf = loopSyncEnabled ? getSyncedLoopBuffer(loop.buffer, beatGrid, startTime, endTime, bpm, loopBeatsCount, preservePitch) : loop.buffer;
+        const activeBuf = loopSyncEnabled ? getSyncedLoopBuffer(loop.buffer, rhythmBeatGrid, startTime, endTime, bpm, loopBeatsCount, preservePitch) : loop.buffer;
         const rStart = startTime + offsetSec;
         const rEnd = endTime + offsetSec;
         const rLen = activeBuf.length;
@@ -1293,10 +1310,10 @@ function App() {
       }
     }
 
-    if (beatGrid.length > 0) {
+    if (rhythmBeatGrid.length > 0) {
       g.strokeStyle = "#FFFFFF";
       g.lineWidth = 1.5;
-      for (const bt of beatGrid) {
+      for (const bt of rhythmBeatGrid) {
         const bx = (bt / duration) * width;
         if (bx < 0 || bx > width) continue;
         g.beginPath();
@@ -1309,7 +1326,7 @@ function App() {
         g.stroke();
       }
     }
-  }, [songBuffer, startTime, endTime, beatGrid, zoom, rhythmMode, patternId, bpm, myLoops, activeLoopIdx, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch, patternPhase]);
+  }, [songBuffer, startTime, endTime, rhythmBeatGrid, zoom, rhythmMode, patternId, bpm, myLoops, activeLoopIdx, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch, patternPhase]);
 
   const timeFromEvent = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -1400,18 +1417,18 @@ function App() {
         return null;
       }
       const buf = loopSyncEnabled
-        ? getSyncedLoopBuffer(loop.buffer, beatGrid, startTime, endTime, bpm, loopBeatsCount, preservePitch)
+        ? getSyncedLoopBuffer(loop.buffer, rhythmBeatGrid, startTime, endTime, bpm, loopBeatsCount, preservePitch)
         : loop.buffer;
       return { buffer: buf, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
     }
     const pattern = PATTERNS.find((p) => p.id === patternId);
-    if (beatGrid.length > 2) {
-      const locked = await buildGridLockedRhythm(pattern, beatGrid, startTime, endTime, songBuffer.sampleRate, offsetSec, patternPhase);
+    if (rhythmBeatGrid.length > 2) {
+      const locked = await buildGridLockedRhythm(pattern, rhythmBeatGrid, startTime, endTime, songBuffer.sampleRate, offsetSec, patternPhase);
       if (locked) return { buffer: locked, rStart: startTime, rEnd: endTime };
     }
     const phrase = await buildPhraseBuffer(pattern, bpm, songBuffer.sampleRate);
     return { buffer: phrase, rStart: startTime + offsetSec, rEnd: endTime + offsetSec };
-  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, beatGrid, startTime, endTime, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch, patternPhase]);
+  }, [songBuffer, rhythmMode, myLoops, activeLoopIdx, patternId, bpm, rhythmBeatGrid, startTime, endTime, syncOffsetMs, loopSyncEnabled, loopBeatsCount, preservePitch, patternPhase]);
 
   const stopPreview = () => {
     previewNodesRef.current.forEach((n) => {
@@ -1465,9 +1482,9 @@ function App() {
       if (introSec > 0) {
         setStatus(`جارِ بناء مقدمة إيقاع ${introSec} ثانية...`);
         workingSong = concatBuffers([silenceBuffer(songBuffer.sampleRate, songBuffer.numberOfChannels, introSec), songBuffer]);
-        if (rhythmMode === "builtin" && beatGrid.length > 2) {
+        if (rhythmMode === "builtin" && rhythmBeatGrid.length > 2) {
           const pattern = PATTERNS.find((p) => p.id === patternId);
-          const extGrid = extendGridBackward(beatGrid, bpm, introSec);
+          const extGrid = extendGridBackward(rhythmBeatGrid, bpm, introSec);
           const introRhythm = await buildGridLockedRhythm(pattern, extGrid, -introSec, endTime, songBuffer.sampleRate, syncOffsetMs / 1000, patternPhase);
           if (introRhythm) { rBuffer = introRhythm; rStart = 0; rEnd = introSec + endTime; }
         } else {
@@ -1768,6 +1785,28 @@ function App() {
                   🧲 محاذاة على جريد النبضات ({beatGrid.length} ضربة مكتشفة)
                 </label>
               )}
+
+              {rhythmBeatGrid.length > 0 && (
+                <div style={styles.rhythmAnchorBox}>
+                  <div style={styles.sliderLabel}>
+                    <span>🎯 نقطة تنبو الإيقاع (منفصلة عن نقطة تنبو الأغنية)</span>
+                    <span className="mono">{fmtTime(rhythmAnchorSec)}</span>
+                  </div>
+                  <div style={styles.hint}>هذي بس تتحكم بمن وين يبدأ عدّ نبضات الإيقاع المُضاف — ما تحرّك بداية تشغيل الأغنية نفسها ({fmtTime(startTime)})</div>
+                  <button
+                    type="button"
+                    style={styles.startFromZeroBtn}
+                    onClick={() => {
+                      if (!songBuffer) return;
+                      setRhythmAnchorSec(startTime);
+                      setRhythmBeatGrid(buildEvenGrid(startTime, bpm, songBuffer.duration));
+                      setStatus("تم ضبط نقطة تنبو الإيقاع على نقطة بداية الأغنية الحالية");
+                    }}
+                  >
+                    استخدم نقطة تنبو الأغنية الحالية ({fmtTime(startTime)})
+                  </button>
+                </div>
+              )}
             </div>
             <label style={styles.checkRow}>
               <input type="checkbox" checked={moveStartToDrop} onChange={(e) => setMoveStartToDrop(e.target.checked)} />
@@ -1819,9 +1858,9 @@ function App() {
               ))}
             </div>
             <div style={styles.hint}>كل نمط فيه تقسيمة تلقائية كل 4 مازورات — مو تكرار ثابت</div>
-            <div style={styles.hint}>{beatGrid.length > 2 ? "✅ الإيقاع محاذى على نبضات الأغنية الحقيقية (اكتشاف تلقائي مفعّل)" : "⚠️ اضغط \"اكتشاف التنبو والجريد تلقائيًا\" فوق حتى يمشي كل دم/تك بالضبط مع نبضات الأغنية الحقيقية"}</div>
+            <div style={styles.hint}>{rhythmBeatGrid.length > 2 ? "✅ الإيقاع محاذى على جريده الخاص (اكتشاف تلقائي مفعّل)" : "⚠️ اضغط \"اكتشاف التنبو والجريد تلقائيًا\" فوق حتى يمشي كل دم/تك بالضبط مع نبضات الأغنية الحقيقية"}</div>
 
-            {beatGrid.length > 2 && (() => {
+            {rhythmBeatGrid.length > 2 && (() => {
               const pattern = PATTERNS.find((p) => p.id === patternId);
               const beatsPerBar = pattern.slots.length / (pattern.stepsPerBeat || 2);
               return (
@@ -1877,13 +1916,13 @@ function App() {
                       طول اللوب الأصلي: {myLoops[activeLoopIdx].buffer.duration.toFixed(2)} ثانية — سيتمدد/يتقصّر تلقائيًا ليطابق سرعة الأغنية المكتشفة
                     </div>
                     {(() => {
-                      const avg = averageBeatInterval(beatGrid, startTime, endTime) || 60 / bpm;
+                      const avg = averageBeatInterval(rhythmBeatGrid, startTime, endTime) || 60 / bpm;
                       const targetDur = loopBeatsCount * avg;
                       const ratio = targetDur / myLoops[activeLoopIdx].buffer.duration;
                       const willStretch = isFinite(ratio) && ratio >= 0.25 && ratio <= 4;
                       return (
                         <div style={styles.hint}>
-                          {beatGrid.length > 2 ? "✅ يستخدم جريد النبضات الحقيقي" : "⚠️ ما فيه جريد محسوب — يستخدم BPM الثابت فقط (اضغط اكتشاف تلقائي فوق)"}
+                          {rhythmBeatGrid.length > 2 ? "✅ يستخدم جريد نبضات الإيقاع" : "⚠️ ما فيه جريد محسوب — يستخدم BPM الثابت فقط (اضغط اكتشاف تلقائي فوق)"}
                           {" — "}المدة المستهدفة: {targetDur.toFixed(2)}ث (نسبة {ratio.toFixed(2)}x)
                           {!willStretch && " — ⚠️ النسبة برّة النطاق المسموح، ما راح يتمدد! غيّر عدد النبضات"}
                         </div>
@@ -1909,31 +1948,41 @@ function App() {
       <section style={{ ...styles.card, ...(canWork ? {} : styles.disabled) }}>
         <div style={styles.stepRow}><span style={styles.stepNum}>04</span><span style={styles.stepTitle}>اضبط السرعة والمستوى</span></div>
 
-        {rhythmMode === "builtin" && (
-          <div style={styles.bpmRow}>
+        <div style={styles.bpmRow}>
             <div style={styles.tempoWrap}>
               <button onClick={handleTap} style={styles.tapBtn}>
                 <span key={previewing ? "p1" : "p0"} style={{ ...styles.pulseCore, animationDuration: `${beatPulseMs}ms` }} />
                 دق
               </button>
               <div>
-                <div className="mono" style={styles.bpmValue}>{bpm} BPM</div>
-                <input type="range" min={60} max={180} value={bpm} onChange={(e) => setBpm(Number(e.target.value))} style={{ width: 160 }} />
+                <div className="mono" style={styles.bpmValue}>{bpm} BPM <span style={styles.bpmSubLabel}>(الإيقاع)</span></div>
+                <input
+                  type="range" min={60} max={180} value={bpm}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setBpm(v);
+                    if (songBuffer) {
+                      const anchor = rhythmAnchorSec || startTime || 0;
+                      setRhythmBeatGrid(buildEvenGrid(anchor, v, songBuffer.duration));
+                    }
+                  }}
+                  style={{ width: 160 }}
+                />
                 <div style={styles.bpmHalveRow}>
                   <button
                     type="button"
                     style={styles.bpmHalveBtn}
                     onClick={() => {
-                      if (beatGrid.length > 3) {
-                        const g = halveGridDensity(beatGrid);
-                        setBeatGrid(g);
+                      if (rhythmBeatGrid.length > 3) {
+                        const g = halveGridDensity(rhythmBeatGrid);
+                        setRhythmBeatGrid(g);
                         setBpm(averageGridBpm(g) || Math.max(60, Math.round(bpm / 2)));
-                        setStatus("تم تصحيح الجريد: نصّفنا عدد النبضات — جرّب المعاينة الحين");
+                        setStatus("تم تصحيح جريد الإيقاع: نصّفنا عدد النبضات — جريد الأغنية ما تغيّر");
                       } else {
                         setBpm((b) => Math.max(60, Math.round(b / 2)));
                       }
                     }}
-                    title="نصّف كثافة النبضات — استخدمها لو الإيقاع يطلع أسرع من اللازم (ضعف السرعة الحقيقية)"
+                    title="نصّف كثافة نبضات الإيقاع فقط — جريد الأغنية يضل زي ما هو"
                   >
                     ÷2
                   </button>
@@ -1941,16 +1990,16 @@ function App() {
                     type="button"
                     style={styles.bpmHalveBtn}
                     onClick={() => {
-                      if (beatGrid.length > 1) {
-                        const g = doubleGridDensity(beatGrid);
-                        setBeatGrid(g);
+                      if (rhythmBeatGrid.length > 1) {
+                        const g = doubleGridDensity(rhythmBeatGrid);
+                        setRhythmBeatGrid(g);
                         setBpm(averageGridBpm(g) || Math.min(180, Math.round(bpm * 2)));
-                        setStatus("تم تصحيح الجريد: ضاعفنا عدد النبضات — جرّب المعاينة الحين");
+                        setStatus("تم تصحيح جريد الإيقاع: ضاعفنا عدد النبضات — جريد الأغنية ما تغيّر");
                       } else {
                         setBpm((b) => Math.min(180, Math.round(b * 2)));
                       }
                     }}
-                    title="ضاعف كثافة النبضات — استخدمها لو الإيقاع يطلع أبطأ من اللازم (نص السرعة الحقيقية)"
+                    title="ضاعف كثافة نبضات الإيقاع فقط — جريد الأغنية يضل زي ما هو"
                   >
                     ×2
                   </button>
@@ -1958,7 +2007,6 @@ function App() {
               </div>
             </div>
           </div>
-        )}
 
         <div style={styles.sliderBlock}>
           <div style={styles.sliderLabel}><span>صوت الأغنية الأصلية</span><span className="mono">{Math.round(songVol * 100)}٪</span></div>
@@ -2093,6 +2141,8 @@ const styles = {
   tempoWrap: { display: "flex", alignItems: "center", gap: 16 },
   tapBtn: { position: "relative", width: 64, height: 64, borderRadius: "50%", background: COLORS.coral, color: "#fff", border: "none", fontWeight: 800, fontSize: 14, overflow: "visible" },
   bpmHalveRow: { display: "flex", gap: 6, marginTop: 6 },
+  bpmSubLabel: { fontSize: 11, color: COLORS.muted, fontWeight: 500 },
+  rhythmAnchorBox: { marginTop: 8, padding: 10, borderRadius: 10, border: `1px dashed ${COLORS.line}`, background: "rgba(255,255,255,0.03)" },
   bpmHalveBtn: { flex: 1, padding: "4px 0", borderRadius: 6, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontWeight: 700, fontSize: 12, cursor: "pointer" },
   pulseCore: { position: "absolute", inset: 0, borderRadius: "50%", border: `2px solid ${COLORS.coral}`, animationName: "pulseRing", animationIterationCount: "infinite", animationTimingFunction: "ease-out" },
   bpmValue: { fontSize: 18, fontWeight: 600, marginBottom: 6 },
