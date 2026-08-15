@@ -869,6 +869,7 @@ function App() {
   const [dragging, setDragging] = useState(null);
   const [beatGrid, setBeatGrid] = useState([]);
   const [snapToGrid, setSnapToGrid] = useState(true);
+  const [moveStartToDrop, setMoveStartToDrop] = useState(true);
   const [syncOffsetMs, setSyncOffsetMs] = useState(0);
   const [introSec, setIntroSec] = useState(0);
 
@@ -1015,14 +1016,18 @@ function App() {
     await new Promise((r) => setTimeout(r, 30));
     try {
       const { bpm: detectedBpm, beatGrid: grid } = await analyzeRhythm(songBuffer);
-      const dropAt = detectDrop(songBuffer);
-      const snappedStart = nearestBeat(grid, Math.min(dropAt, songBuffer.duration - 0.5));
       setBpm(detectedBpm);
       setBeatGrid(grid);
       setSnapToGrid(true);
-      setStartTime(snappedStart);
-      setEndTime(songBuffer.duration);
-      setStatus(`رصدنا ${detectedBpm} BPM وجريد ${grid.length} نبضة — نقطة التنبو محاذاة على أقرب ضربة عند ${fmtTime(snappedStart)}`);
+      if (moveStartToDrop) {
+        const dropAt = detectDrop(songBuffer);
+        const snappedStart = nearestBeat(grid, Math.min(dropAt, songBuffer.duration - 0.5));
+        setStartTime(snappedStart);
+        setEndTime(songBuffer.duration);
+        setStatus(`رصدنا ${detectedBpm} BPM وجريد ${grid.length} نبضة — نقطة التنبو محاذاة على أقرب ضربة عند ${fmtTime(snappedStart)}`);
+      } else {
+        setStatus(`رصدنا ${detectedBpm} BPM وجريد ${grid.length} نبضة — نقطة البداية ما تغيّرت (المفتاح مطفي)`);
+      }
     } catch (err) {
       setStatus("تعذّر التحليل التلقائي: " + String(err.message || err));
     }
@@ -1088,7 +1093,8 @@ function App() {
     g.clearRect(0, 0, width, height);
 
     const duration = songBuffer.duration;
-    const bins = Math.min(20000, Math.max(900, Math.round(900 * zoom)));
+    const physicalWidth = width * dpr;
+    const bins = Math.max(200, Math.min(20000, Math.floor(physicalWidth), Math.round(900 * zoom)));
     const displayPeaks = computePeaks(songBuffer, bins);
     const startX = (startTime / duration) * width;
     const endX = (endTime / duration) * width;
@@ -1120,6 +1126,21 @@ function App() {
         if (bx < 0 || bx > width) continue;
         g.beginPath();
         g.moveTo(bx, 0);
+        g.lineTo(bx, height);
+        g.stroke();
+      }
+      g.strokeStyle = "#FFFFFF";
+      g.lineWidth = 2;
+      const tickLen = 14;
+      for (const bt of beatGrid) {
+        const bx = (bt / duration) * width;
+        if (bx < 0 || bx > width) continue;
+        g.beginPath();
+        g.moveTo(bx, 0);
+        g.lineTo(bx, tickLen);
+        g.stroke();
+        g.beginPath();
+        g.moveTo(bx, height - tickLen);
         g.lineTo(bx, height);
         g.stroke();
       }
@@ -1693,6 +1714,10 @@ function App() {
                 </label>
               )}
             </div>
+            <label style={styles.checkRow}>
+              <input type="checkbox" checked={moveStartToDrop} onChange={(e) => setMoveStartToDrop(e.target.checked)} />
+              نقل نقطة البداية لموضع التنبو المكتشف تلقائيًا (عطّلها لو تبي بس السرعة والجريد بدون تحريك البداية)
+            </label>
             <button onClick={handleAutoAnalyze} style={styles.analyzeBtn}>🎯 اكتشاف التنبو والجريد تلقائيًا (الأغنية كاملة)</button>
             {beatGrid.length > 0 && (
               <button onClick={handleReanalyzeRange} style={styles.reanalyzeBtn}>🔄 إعادة تحليل المقطع المحدد فقط (أدق)</button>
