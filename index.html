@@ -1862,13 +1862,13 @@ function App() {
             <div style={styles.zoomRow}>
               <button
                 onClick={() => { const s = scrollRef.current; if (s) s.scrollLeft = Math.max(0, s.scrollLeft - s.clientWidth * 0.5); }}
-                style={styles.zoomBtn}
+                style={styles.navBtn}
               >
                 ◀ تحريك يسار
               </button>
               <button
                 onClick={() => { const s = scrollRef.current; if (s) s.scrollLeft = Math.min(s.scrollWidth, s.scrollLeft + s.clientWidth * 0.5); }}
-                style={styles.zoomBtn}
+                style={styles.navBtn}
               >
                 تحريك يمين ▶
               </button>
@@ -2354,6 +2354,7 @@ const styles = {
   zoomBtn: { width: 36, height: 36, borderRadius: 8, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontSize: 18, fontWeight: 700 },
   zoomLabel: { fontSize: 12, color: COLORS.muted, minWidth: 70, textAlign: "center" },
   zoomReset: { padding: "6px 10px", borderRadius: 8, border: `1px solid ${COLORS.line}`, background: "transparent", color: COLORS.muted, fontSize: 11 },
+  navBtn: { flex: 1, padding: "10px 6px", borderRadius: 8, border: `1px solid ${COLORS.line}`, background: COLORS.panel2, color: COLORS.text, fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" },
   batchBtn: { display: "block", width: "100%", marginTop: 10, background: COLORS.coral, color: "#fff", fontWeight: 800, padding: "12px 14px", borderRadius: 12, border: "none", fontSize: 14 },
   markerRow: { display: "flex", justifyContent: "space-between", fontSize: 13, marginTop: 8 },
   numRow: { display: "flex", gap: 10, marginTop: 10 },
