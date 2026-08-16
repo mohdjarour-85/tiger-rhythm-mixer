@@ -2233,14 +2233,31 @@ function App() {
                   type="range" min={60} max={180} value={bpm}
                   onChange={(e) => {
                     const v = Number(e.target.value);
-                    setBpm(v);
                     if (songBuffer) {
-                      const anchor = rhythmAnchorSec || startTime || 0;
-                      setRhythmBeatGrid(buildEvenGrid(anchor, v, songBuffer.duration));
+                      if (rhythmBeatGrid && rhythmBeatGrid.length > 2 && bpm > 0) {
+                        /* فيه جريد حقيقي مكتشف من الأغنية: ما نلغيه بجريد ثابت جديد،
+                           بس نمدد/نضغط نفس مواقع النبضات الحقيقية حوالين نقطة الإرساء
+                           عشان يضل متزامن مع الأغنية بدل ما ينحرف عنها */
+                        const anchor = rhythmAnchorSec || startTime || 0;
+                        const ratio = bpm / v;
+                        const scaled = rhythmBeatGrid.map((t) => anchor + (t - anchor) * ratio);
+                        setRhythmBeatGrid(scaled);
+                      } else {
+                        const anchor = rhythmAnchorSec || startTime || 0;
+                        setRhythmBeatGrid(buildEvenGrid(anchor, v, songBuffer.duration));
+                      }
                     }
+                    setBpm(v);
                   }}
                   style={{ width: 160 }}
                 />
+                {rhythmBeatGrid && rhythmBeatGrid.length > 2 && (
+                  <div style={styles.hint}>
+                    ✅ فيه جريد حقيقي مكتشف — سحب الشريط يمدد نفس نبضات الأغنية بدل ما يبني جريد وهمي.
+                    لو حاسس الإيقاع طلع منحرف، الأدق إنك تكتب BPM الصحيح بالخانة تحت وتضغط
+                    "🎯 ابحث عن جريد الأغنية بهذا الـBPM" عشان يعيد الكشف على الأغنية فعليًا بدل التمديد التقريبي.
+                  </div>
+                )}
                 {showAdvanced && (
                   <>
                     <div style={styles.bpmHalveRow}>
