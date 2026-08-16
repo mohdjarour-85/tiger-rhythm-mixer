@@ -1680,7 +1680,14 @@ function App() {
         if (rhythmMode === "builtin" && rhythmBeatGrid.length > 2) {
           const pattern = PATTERNS.find((p) => p.id === patternId);
           const extGrid = extendGridBackward(rhythmBeatGrid, bpm, introSec);
-          const introRhythm = await buildGridLockedRhythm(pattern, extGrid, -introSec, endTime, songBuffer.sampleRate, syncOffsetMs / 1000, patternPhase);
+          /* extendGridBackward يحط نبضات إضافية قبل بداية الجريد الحقيقي، فيتغيّر عدد النبضات
+             اللي قبل أول نبضة حقيقية — وبما إن ترتيب دم/تك بالنمط (beatInBar) محسوب من رقم فهرس
+             النبضة (i)، أي إزاحة بعدد النبضات المضافة تقلب ترتيب النمط كامل بجسم الأغنية (حتى لو
+             التوقيت الزمني نفسه صحيح). نعوّض هالإزاحة بتصحيح الـ phase عشان النمط يطلع بنفس
+             ترتيبه بالظبط اللي كان بيطلع لو صدّرت بدون مقدمة أصلًا */
+          const addedBeats = extGrid.length - rhythmBeatGrid.length;
+          const adjustedPhase = patternPhase - addedBeats;
+          const introRhythm = await buildGridLockedRhythm(pattern, extGrid, -introSec, endTime, songBuffer.sampleRate, syncOffsetMs / 1000, adjustedPhase);
           if (introRhythm) { rBuffer = introRhythm; rStart = 0; rEnd = introSec + endTime; }
         } else {
           /* بدون جريد حقيقي (نمط ثابت أو لوب مخصص): buildMix يكرّر الإيقاع تلقائيًا طول أي نطاق تعطيه له،
