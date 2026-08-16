@@ -1694,27 +1694,33 @@ function App() {
       let mixed = buildMix(workingSong, rBuffer, rStart, rEnd, songVol, rhythmVol, 0, workingSong.duration);
       limitClipping(mixed);
 
-      if (masterBoost) {
-        setStatus("جارِ تلميع وتقوية الصوت النهائي...");
-        const offline = new OfflineAudioContext(mixed.numberOfChannels, mixed.length, mixed.sampleRate);
+      /* نمرّر التلميع وتغيير معدل العينات بـ OfflineAudioContext واحد بدل رندرين منفصلين متسلسلين:
+         تسلسل رندرين كان ممكن يضيف انزياح ثابت بسيط (كسور ملي ثانية) بحدود كل رندر — إحساسه
+         بالإيقاع واضح رغم إنه صغير رقميًا، وهذا بالضبط سبب "الملف كله منزاح" اللي يصير بالتصدير بس */
+      const needResample = outputSR && mixed.sampleRate !== outputSR;
+      if (masterBoost || needResample) {
+        setStatus(masterBoost ? "جارِ تلميع وتقوية الصوت النهائي..." : `جارِ التحويل لمعدل ${outputSR / 1000}kHz...`);
+        const targetRate = needResample ? outputSR : mixed.sampleRate;
+        const newLength = needResample ? Math.ceil(mixed.duration * targetRate) : mixed.length;
+        const offline = new OfflineAudioContext(mixed.numberOfChannels, newLength, targetRate);
         const src = offline.createBufferSource();
         src.buffer = mixed;
-        const comp = offline.createDynamicsCompressor();
-        comp.threshold.value = -10;
-        comp.knee.value = 12;
-        comp.ratio.value = 3;
-        comp.attack.value = 0.003;
-        comp.release.value = 0.25;
-        src.connect(comp).connect(offline.destination);
+        let node = src;
+        if (masterBoost) {
+          const comp = offline.createDynamicsCompressor();
+          comp.threshold.value = -10;
+          comp.knee.value = 12;
+          comp.ratio.value = 3;
+          comp.attack.value = 0.003;
+          comp.release.value = 0.25;
+          node.connect(comp);
+          node = comp;
+        }
+        node.connect(offline.destination);
         src.start(0);
         mixed = await offline.startRendering();
-        mixed = normalizePeak(mixed, -1);
-      }
-
-      if (outputSR && mixed.sampleRate !== outputSR) {
-        setStatus(`جارِ التحويل لمعدل ${outputSR / 1000}kHz...`);
-        mixed = await resampleTo(mixed, outputSR);
         limitClipping(mixed);
+        if (masterBoost) mixed = normalizePeak(mixed, -1);
       }
 
       setStatus(outputFormat === "mp3" ? "جارِ تجهيز ملف MP3 للتحميل..." : "جارِ تجهيز ملف WAV للتحميل...");
@@ -1803,20 +1809,27 @@ function App() {
         setBatchStatus(`(${i + 1}/${songFiles.length}) دمج ${f.name}...`);
         let mixed = buildMix(f.buffer, rhythmBuffer, rStart, rEnd, songVol, rhythmVol, 0, f.buffer.duration);
         limitClipping(mixed);
-        if (masterBoost) {
-          const offline = new OfflineAudioContext(mixed.numberOfChannels, mixed.length, mixed.sampleRate);
-          const src = offline.createBufferSource();
-          src.buffer = mixed;
-          const comp = offline.createDynamicsCompressor();
-          comp.threshold.value = -10; comp.knee.value = 12; comp.ratio.value = 3; comp.attack.value = 0.003; comp.release.value = 0.25;
-          src.connect(comp).connect(offline.destination);
-          src.start(0);
-          mixed = await offline.startRendering();
-          mixed = normalizePeak(mixed, -1);
-        }
-        if (outputSR && mixed.sampleRate !== outputSR) {
-          mixed = await resampleTo(mixed, outputSR);
-          limitClipping(mixed);
+        {
+          const needResample = outputSR && mixed.sampleRate !== outputSR;
+          if (masterBoost || needResample) {
+            const targetRate = needResample ? outputSR : mixed.sampleRate;
+            const newLength = needResample ? Math.ceil(mixed.duration * targetRate) : mixed.length;
+            const offline = new OfflineAudioContext(mixed.numberOfChannels, newLength, targetRate);
+            const src = offline.createBufferSource();
+            src.buffer = mixed;
+            let node = src;
+            if (masterBoost) {
+              const comp = offline.createDynamicsCompressor();
+              comp.threshold.value = -10; comp.knee.value = 12; comp.ratio.value = 3; comp.attack.value = 0.003; comp.release.value = 0.25;
+              node.connect(comp);
+              node = comp;
+            }
+            node.connect(offline.destination);
+            src.start(0);
+            mixed = await offline.startRendering();
+            limitClipping(mixed);
+            if (masterBoost) mixed = normalizePeak(mixed, -1);
+          }
         }
         const bitDepth = outputQuality === "high" ? 24 : 16;
         const blob = audioBufferToWav(mixed, bitDepth);
